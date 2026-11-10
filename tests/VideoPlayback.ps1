@@ -9,7 +9,8 @@ $viewport.Children.Add($poster) | Out-Null
 Add-Type 'using System; public static class PlaybackFixture { public static Func<Action<string,string>,Action> Resolver(string path) { return done => { done(path, null); return null; }; } }'
 $resolver=[PlaybackFixture]::Resolver($Fixture)
 $flags=[Reflection.BindingFlags]'Instance,NonPublic'
-$player=$type.GetConstructors($flags)[0].Invoke([object[]]@($viewport.PSObject.BaseObject,$resolver))
+# The constructor's third argument (an optional preparation-stage callback) has no default when called by reflection.
+$player=$type.GetConstructors($flags)[0].Invoke([object[]]@($viewport.PSObject.BaseObject,$resolver,$null))
 $dock=New-Object Windows.Controls.DockPanel
 [Windows.Controls.DockPanel]::SetDock($player,'Bottom'); $dock.Children.Add($player) | Out-Null; $dock.Children.Add($viewport) | Out-Null
 $window=New-Object Windows.Window -Property @{Title='Generated video playback check';Width=820;Height=540;Content=$dock;WindowStartupLocation='CenterScreen'}

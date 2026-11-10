@@ -181,7 +181,7 @@ function mountFleetHackerDesktop(api, themes) {
   byId('fh-choose-source').addEventListener('click', api.chooseSource);
   byId('fh-search-button').addEventListener('click', api.refresh);
   byId('fh-refresh').addEventListener('click', api.refresh);
-  byId('fh-source').addEventListener('keydown', event => { if (event.key === 'Enter') api.chooseSource(); });
+  byId('fh-source').addEventListener('keydown', event => { if (event.key === 'Enter' && !byId('fh-choose-source').disabled) api.chooseSource(); });
 
   const results = byId('results');
   const quick = byId('fh-quick');
@@ -191,7 +191,7 @@ function mountFleetHackerDesktop(api, themes) {
   const rate = byId('fh-quick-rate');
   const rateField = byId('fh-quick-rate-field');
   let videoRequest = 0, videoUrl = '';
-  let focusedKey = null, position = 0, frame = 0, scale = 1, rotation = 0, drag, pending = false;
+  let focusedKey = null, position = 0, frame = 0, scale = 1, rotation = 0, panX = 0, panY = 0, drag, pending = false;
   let rows = [];
   function resetVideo() {
     ++videoRequest;
@@ -262,7 +262,7 @@ function mountFleetHackerDesktop(api, themes) {
       rows[Math.max(0, Math.min(position, rows.length - 1))];
     focusedKey = card?.dataset.key || null;
     position = card ? rows.indexOf(card) : 0;
-    if (focusedKey !== previous) { scale = 1; rotation = 0; resetVideo(); }
+    if (focusedKey !== previous) { scale = 1; rotation = 0; panX = panY = 0; resetVideo(); }
     for (const row of rows) {
       renderRow(row);
       row.classList.toggle('fh-focused', row === card);
@@ -282,7 +282,8 @@ function mountFleetHackerDesktop(api, themes) {
       text('fh-quick-path', location);
       if (video.hidden) updatePicture('fh-quick', card);
       play.hidden = !card?.__fleetIsVideo || !video.hidden;
-      byId('fh-quick-image').style.transform = 'rotate(' + rotation + 'deg) scale(' + scale + ')';
+      byId('fh-quick-image').style.transform = quickTransform();
+      stage.classList.toggle('fh-zoomed', scale > 1.01);
       byId('fh-quick-prev').disabled = !card || position === 0;
       byId('fh-quick-next').disabled = !card || position === rows.length - 1;
       byId('fh-quick-good').disabled = byId('fh-quick-bad').disabled = pending || !card;
@@ -378,10 +379,26 @@ function mountFleetHackerDesktop(api, themes) {
       fail(error.message || 'The original video could not be opened.');
     }
   });
-  function zoom(delta) { scale = Math.max(1, Math.min(6, scale * delta)); refresh(); }
+  function quickTransform() {
+    return 'translate(' + panX + 'px,' + panY + 'px) rotate(' + rotation + 'deg) scale(' + scale + ')';
+  }
+  // Keep part of a zoomed picture inside the stage; at normal size there is nothing to pan.
+  function setPan(x, y) {
+    const limitX = Math.max(0, (scale - 1) * stage.clientWidth / 2);
+    const limitY = Math.max(0, (scale - 1) * stage.clientHeight / 2);
+    panX = Math.max(-limitX, Math.min(limitX, x));
+    panY = Math.max(-limitY, Math.min(limitY, y));
+    byId('fh-quick-image').style.transform = quickTransform();
+  }
+  function zoom(delta) {
+    scale = Math.max(1, Math.min(6, scale * delta));
+    if (scale <= 1.01) scale = 1;
+    setPan(panX, panY);
+    refresh();
+  }
   byId('fh-zoom-out').addEventListener('click', () => zoom(1 / 1.25));
   byId('fh-zoom-in').addEventListener('click', () => zoom(1.25));
-  byId('fh-zoom-reset').addEventListener('click', () => { scale = 1; rotation = 0; refresh(); });
+  byId('fh-zoom-reset').addEventListener('click', () => { scale = 1; rotation = 0; panX = panY = 0; refresh(); });
   byId('fh-rotate').addEventListener('click', () => { rotation = (rotation + 90) % 360; refresh(); });
   stage.addEventListener('wheel', event => {
     if (!video.hidden) return;
@@ -406,19 +423,29 @@ function mountFleetHackerDesktop(api, themes) {
     event.preventDefault();
     keys[event.key]();
   });
+  // As in the Windows app, dragging a zoomed picture pans it and never reviews it. Only a drag that
+  // starts and ends on the same unzoomed item counts as a swipe, and only one pointer may take part:
+  // a second finger (a pinch or two-finger tap) cancels the gesture instead of being measured against the first.
   stage.addEventListener('pointerdown', event => {
+    if (!event.isPrimary) { if (drag) drag.cancelled = true; return; }
     if (event.button !== 0 || event.target.closest('video')) return;
-    drag = {x:event.clientX, y:event.clientY};
-    stage.setPointerCapture(event.pointerId);
+    drag = {id:event.pointerId, x:event.clientX, y:event.clientY, panX, panY, pan:scale > 1.01, key:focusedKey, cancelled:false};
+    try { stage.setPointerCapture(event.pointerId); } catch { /* The pointer already ended. */ }
+  });
+  stage.addEventListener('pointermove', event => {
+    if (drag?.pan && !drag.cancelled && event.pointerId === drag.id)
+      setPan(drag.panX + event.clientX - drag.x, drag.panY + event.clientY - drag.y);
   });
   stage.addEventListener('pointerup', event => {
-    if (!drag) return;
+    if (!drag || event.pointerId !== drag.id) return;
     const x = event.clientX - drag.x, y = event.clientY - drag.y;
+    const swipe = !drag.cancelled && !drag.pan && scale <= 1.01 && drag.key === focusedKey;
     drag = null;
-    if (Math.max(Math.abs(x), Math.abs(y)) < 48) return;
+    if (!swipe || Math.max(Math.abs(x), Math.abs(y)) < 48) return;
     if (Math.abs(x) > Math.abs(y)) keys[x < 0 ? 'ArrowLeft' : 'ArrowRight']();
     else keys[y < 0 ? 'ArrowUp' : 'ArrowDown']();
   });
-  stage.addEventListener('pointercancel', () => { drag = null; });
+  for (const name of ['pointercancel', 'lostpointercapture'])
+    stage.addEventListener(name, event => { if (drag && event.pointerId === drag.id) drag = null; });
   setView('list');
 }

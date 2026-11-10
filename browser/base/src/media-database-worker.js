@@ -216,7 +216,8 @@ const actions={
     if(input?.snapshot){const value=snapshots.get(input.snapshot);if(!value)throw new Error('Recovery snapshot unavailable.');await copyFile(value.path,path);}else await importFile(path,input||new Blob());
     await open();
    }
-   await db.run('PRAGMA cache_size=-8192; PRAGMA temp_store=FILE; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');return{id};
+   // A catalog can come from someone else: do not let SQL in its schema call unsafe functions, and reject malformed cells.
+   await db.run('PRAGMA trusted_schema=OFF; PRAGMA cell_size_check=ON; PRAGMA cache_size=-8192; PRAGMA temp_store=FILE; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;');return{id};
   }catch(e){try{if(db)await db.close();else if(!recovering)await removeWorkingFiles(path);}catch(_){}databases.delete(id);throw e;}
  },
  async query({id,sql,params,token}){const db=getDatabase(id);if(db.transaction&&db.transaction!==token)throw new Error('Database transaction is busy.');return db.exec(sql,params);},

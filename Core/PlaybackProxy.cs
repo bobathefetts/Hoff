@@ -50,7 +50,7 @@ namespace MediaReviewer {
         }
 
         internal static int Worker() {
-            using(var request=new BinaryReader(Console.OpenStandardInput(),Encoding.UTF8)){
+            using(var request=new BinaryReader(WorkerInput.Open(),Encoding.UTF8)){
                 string format=request.ReadString(),input=request.ReadString(),output=request.ReadString();
                 if(!Formats.UsesPlaybackProxy(format) || !Path.IsPathRooted(input) || !Path.IsPathRooted(output) ||
                     input.Length>32767 || output.Length>32767 || !MediaScratch.IsPlaybackPath(output))return 2;

@@ -148,7 +148,7 @@ namespace MediaReviewer {
 
         internal static int Run(bool gemma,bool useGpu){
             SetErrorMode(0x8003);
-            using(var reader=new BinaryReader(Console.OpenStandardInput(),Encoding.UTF8))
+            using(var reader=new BinaryReader(WorkerInput.Open(),Encoding.UTF8))
             using(var writer=new BinaryWriter(Console.OpenStandardOutput(),Encoding.UTF8)){
                 IntPtr model=IntPtr.Zero;CloseModel close=null;
                 try{

@@ -67,7 +67,7 @@ app = replaceOnce(app, '  setupStickySelectionBar();', `
       return file.type ? file : file.slice(0, file.size, mediaMime(source.extension));
     },
     refresh: () => renderResults(),
-    chooseSource: () => { void chooseScanFolder(); },
+    chooseSource: () => { void openScanDialog(); }, // the scan dialog owns the catalog-ready check and shows scan errors
     summary: () => ({
       catalog: workspaceLoadedFromFile ? workspaceFileHandle?.name || $('#database-opening-file').textContent || 'Browser catalog'
         : 'Welcome · open or create a catalog',

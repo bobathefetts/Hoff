@@ -113,6 +113,41 @@ async function run() {
   assert.equal(await evaluate('return document.querySelector(".fh-desktop-shell").dataset.view'), 'gallery');
   await view('quick');
   await wait(() => evaluate('return document.getElementById("fh-quick-name").textContent === "example.png"'), 'Quick Review item');
+  // Dragging a zoomed picture must pan it, never review it.
+  await click('fh-zoom-in');
+  await click('fh-zoom-in');
+  const elementKey = 'element-6066-11e4-a52e-4f735466cecf';
+  const stage = await request('POST', '/session/' + session + '/element', {using: 'css selector', value: '#fh-quick-stage'});
+  const dragDown = () => request('POST', '/session/' + session + '/actions', {actions: [{
+    type: 'pointer', id: 'mouse', parameters: {pointerType: 'mouse'}, actions: [
+      {type: 'pointerMove', duration: 0, origin: {[elementKey]: stage[elementKey]}, x: 0, y: -40},
+      {type: 'pointerDown', button: 0},
+      {type: 'pointerMove', duration: 50, origin: 'pointer', x: 0, y: 120},
+      {type: 'pointerUp', button: 0}]}]});
+  await dragDown();
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.deepEqual(await evaluate(`return [
+    document.getElementById('count-COMPLIANT').textContent, document.getElementById('count-NON_COMPLIANT').textContent,
+    document.getElementById('fh-quick-good').disabled,
+    /^translate\\(0px, ?[1-9]/.test(document.getElementById('fh-quick-image').style.transform)]`),
+    ['0', '0', false, true], 'a drag on a zoomed Quick Review picture must pan without recording a decision');
+  await click('fh-zoom-reset');
+  assert.match(await evaluate('return document.getElementById("fh-quick-image").style.transform'), /^translate\(0px(, ?0px)?\) rotate\(0deg\) scale\(1\)$/);
+  // Two fingers on the unzoomed picture (a pinch or two-finger tap) must not be measured as one swipe.
+  // Headless Firefox delivers no events for WebDriver touch actions, so the two contacts are dispatched directly.
+  await evaluate(`
+    const stage = document.getElementById('fh-quick-stage'), box = stage.getBoundingClientRect();
+    const x = box.left + box.width / 2, middle = box.top + box.height / 2;
+    const send = (type, pointerId, isPrimary, y) => stage.dispatchEvent(new PointerEvent(type,
+      {pointerId, isPrimary, pointerType:'touch', button:0, clientX:x, clientY:y, bubbles:true}));
+    send('pointerdown', 21, true, middle - 70);
+    send('pointerdown', 22, false, middle + 70);
+    send('pointerup', 21, true, middle - 70);
+    send('pointerup', 22, false, middle + 70);`);
+  await new Promise(resolve => setTimeout(resolve, 400));
+  assert.deepEqual(await evaluate(`return [
+    document.getElementById('count-COMPLIANT').textContent, document.getElementById('count-NON_COMPLIANT').textContent,
+    document.getElementById('fh-quick-good').disabled]`), ['0', '0', false], 'two fingers on Quick Review must not record a decision');
   await evaluate(`
     document.getElementById('fh-bulk-notes').value = 'Reviewed via Quick Review';
     document.getElementById('fh-quick').dispatchEvent(new KeyboardEvent('keydown', {key:'ArrowUp', bubbles:true}));`);

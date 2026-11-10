@@ -63,7 +63,7 @@ namespace MediaReviewer {
     public sealed class UiResult {
         public string RequestId,Kind,Error,OperationId,Value; public long Generation;
         public bool Success,Reconciled; public PageData Page; public long[] GroupIds;
-        internal bool ProtectedDetails;
+        internal bool ProtectedDetails,ReviewChanged;
         internal Dictionary<long,long> ReviewRevisions;
         public IdentityResolutionPreview IdentityPreview;
         public InspectorData Inspector;public LocationPage Locations;

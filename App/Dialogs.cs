@@ -122,6 +122,18 @@ namespace MediaReviewer {
             actions.Children.Add(ActionButton("Cancel",dialog.Close));content.Children.Add(new ScrollViewer {Content=list});dialog.ShowDialog();
         }
 
+        // Read the PasswordBox through its SecureString so no managed string copy of the password is created;
+        // a string could not be cleared and would stay in memory until the collector happened to reclaim it.
+        static byte[] PasswordBytes(System.Security.SecureString secure){
+            if(secure==null || secure.Length==0)return new byte[0];
+            IntPtr text=System.Runtime.InteropServices.Marshal.SecureStringToBSTR(secure);
+            try{
+                char[] chars=new char[secure.Length];
+                try{System.Runtime.InteropServices.Marshal.Copy(text,chars,0,chars.Length);return Encoding.UTF8.GetBytes(chars);}
+                finally{Array.Clear(chars,0,chars.Length);}
+            }finally{System.Runtime.InteropServices.Marshal.ZeroFreeBSTR(text);}
+        }
+
         byte[] Password(string title,string prompt,bool confirm){
             var panel=new StackPanel {Margin=new Thickness(18)};var dialog=Dialog(title,panel,535,confirm ? 315 : 250);
             panel.Children.Add(Label(prompt));
@@ -130,8 +142,8 @@ namespace MediaReviewer {
             if(confirm){panel.Children.Add(Label("Confirm password"));panel.Children.Add(again);}
             var actions=Bar();panel.Children.Add(actions);byte[] value=null;
             var ok=ActionButton(confirm ? "Set password" : "Unlock",()=>{
-                if(input.Password.Length==0 || confirm && input.Password!=again.Password)return;
-                value=Encoding.UTF8.GetBytes(input.Password);dialog.DialogResult=true;
+                byte[] first=null,second=null;try{using(var secure=input.SecurePassword)first=PasswordBytes(secure);if(confirm)using(var secure=again.SecurePassword)second=PasswordBytes(secure);if(first.Length==0 || confirm && !first.SequenceEqual(second))return;
+                value=first;first=null;dialog.DialogResult=true;}finally{if(first!=null)Array.Clear(first,0,first.Length);if(second!=null)Array.Clear(second,0,second.Length);}
             });
             ok.IsDefault=true;actions.Children.Add(ok);var cancel=ActionButton("Cancel",dialog.Close);cancel.IsCancel=true;actions.Children.Add(cancel);
             dialog.Loaded+=(s,e)=>input.Focus();try{dialog.ShowDialog();return value;}finally{input.Clear();again.Clear();}
@@ -209,13 +221,21 @@ namespace MediaReviewer {
             Menu(menu,"🔗 Sources / reconnect…",ManageSources);
             Menu(menu,"📁 Open catalog folder",()=>System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(Path.GetDirectoryName(engine.DatabasePath)){UseShellExecute=true}));
             Menu(menu,"🔄 Reconnect all sources…",()=>{
-                string path=PromptSource();
-                if(path!=null)Work(engine.RequestReconnectAll(path),"Reconnect all sources");
+                bool acceptCandidates;
+                string path=PromptSource(out acceptCandidates);
+                if(path!=null)Work(engine.RequestReconnectAll(path,acceptCandidates),"Reconnect all sources");
             });
             Menu(menu,"▶ Resume source reconnection",()=>Queue(engine.RequestReconnectAllStatus(),r=>{
                 if(!r.Success){Message(r.Error);return;}
                 if(String.IsNullOrEmpty(r.Reconnection.Id)){Message("No saved reconnection.");return;}
-                Work(engine.RequestResumeReconnectAll(r.Reconnection.Id),"Resume reconnection");
+                // The acceptance is asked again on resume: it is a decision for the person in front of the screen and is not saved in the catalog.
+                bool acceptCandidates=false;
+                if(r.Reconnection.State=="running" || r.Reconnection.State=="interrupted"){
+                    var answer=MessageBox.Show(Window,"Also accept quick candidate matches for the sources still to be checked?\n\nA quick candidate is a larger file matched on sampled parts only. It is not full-file proof.\n\nYes: bind full matches and quick candidates.\nNo: bind full matches only and leave quick candidates unverified.","Resume source reconnection",MessageBoxButton.YesNoCancel,MessageBoxImage.Question,MessageBoxResult.No);
+                    if(answer==MessageBoxResult.Cancel)return;
+                    acceptCandidates=answer==MessageBoxResult.Yes;
+                }
+                Work(engine.RequestResumeReconnectAll(r.Reconnection.Id,acceptCandidates),"Resume reconnection");
             }));
             Menu(menu,"🗑 Discard unfinished source reconnection",()=>Queue(engine.RequestReconnectAllStatus(),r=>{
                 if(!r.Success){Message(r.Error);return;}
@@ -303,7 +323,7 @@ namespace MediaReviewer {
         void ShowDraftReview(){
             if(!Ready)return;
             bool available=DraftModelWorker.GemmaAvailable();
-            if(available!=gemmaAvailable){gemmaAvailable=available;refresh=true;view.Advance();}
+            if(available!=gemmaAvailable){gemmaAvailable=available;InvalidateView();}
             var body=new StackPanel {Margin=new Thickness(18)};
             var dialog=Dialog("AI draft check",body,590,510);
             body.Children.Add(Label("Choose a model for saved images and sampled frames from videos and GIFs. Matches appear in AI suggestions for human confirmation."));
@@ -367,7 +387,7 @@ namespace MediaReviewer {
                     if(!result.Success){Message("Could not save AI settings. "+result.Error);return;}
                     if(gemma){gemmaThreshold=percent;gemmaCpuOnly=cpuOnly;if(criteriaChanged)gemmaCriteria=criteria;}else marqoThreshold=percent;
                     useGemma=gemma;
-                    if(BucketKeys[bucket]==DraftReview.Bucket)NewPage(1);else{view.Advance();refresh=true;}
+                    if(BucketKeys[bucket]==DraftReview.Bucket)NewPage(1);else InvalidateView();
                     Message(result.Value);
                     if(run && Ready)Guard(()=>StartDraftReview(gemma,cpuOnly));
                 });
@@ -465,15 +485,21 @@ namespace MediaReviewer {
             Menu(menu,"♥ About Media Review",About);
             menu.PlacementTarget=target;menu.IsOpen=true;
         }
-        string PromptSource() {
-            var body=new StackPanel {Margin=new Thickness(16)};var dialog=Dialog("Reconnect all sources",body,650,285);
+        string PromptSource(out bool acceptCandidates) {
+            var body=new StackPanel {Margin=new Thickness(16)};var dialog=Dialog("Reconnect all sources",body,650,345);
             body.Children.Add(Label("Enter the actual media root. You can use a UNC share, mapped drive, or the local folder on the file server."));
             var path=Editor(Box("SourceBox").Text,32767);body.Children.Add(path);
+            // Off by default: a sampled-hash match must never be bound to a saved review without someone choosing that.
+            var candidates=new CheckBox {Content="Also accept quick candidate matches (not full-file proof)",Margin=new Thickness(4,10,4,0),
+                ToolTip="A quick candidate is a larger file matched on sampled parts only. Leave this off to bind full matches only. A candidate that is already bound for the same unchanged file at this location stays bound; any other candidate stays unverified until you rescan the new location or run Reconnect all again with this option."};
+            body.Children.Add(candidates);
             var actions=Bar();body.Children.Add(actions);
             actions.Children.Add(ActionButton("Browse…",()=>{string selected=ChooseFolder("Choose the replacement root",path.Text);if(selected!=null)path.Text=selected;}));
             var ok=ActionButton("Reconnect",()=>{if(!String.IsNullOrWhiteSpace(path.Text))dialog.DialogResult=true;});ok.IsDefault=true;actions.Children.Add(ok);
             actions.Children.Add(ActionButton("Cancel",dialog.Close));
-            return dialog.ShowDialog()==true ? path.Text.Trim() : null;
+            bool accepted=dialog.ShowDialog()==true;
+            acceptCandidates=accepted && candidates.IsChecked==true;
+            return accepted ? path.Text.Trim() : null;
         }
         void RetentionLimits(OriginalStorageLimits limits) {
             var body=new StackPanel {Margin=new Thickness(16)};var dialog=Dialog("Retention limits",body,525,355);

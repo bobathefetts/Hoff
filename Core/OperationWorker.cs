@@ -86,13 +86,28 @@ namespace MediaReviewer {
                         if(failure.Length==0 && (work.Progress.Kind=="Report" && value is string || published!=null && published.OutputPublished)){string warning=" The final database status could not be saved: "+error.Message;string message;if(published!=null){published.Message+=warning;message=published.Message;}else{value=(string)value+warning;message=(string)value;}lock(operationGate){work.Progress.Stage=message;}Update(s=>s.Error=message);}
                         else{failure="Operation outcome could not be committed; inspect its output before retrying: "+error.Message;lock(operationGate){work.Progress.State="failed";work.Progress.Error=failure;}}
                     }
-                    Update(s=>{s.BusyOperation=false;s.Stage=s.RunningScan ? "Scanning" : "Ready";});
-                    var receipt=value as IdentityResolutionReceipt;
-                    var original=value as OriginalReceipt;var secret=value as EvidenceInspection;
-                    if(secret!=null && (failure.Length!=0 || !vaultUnlocked || secret.Epoch!=VaultGeneration)){secret.Dispose();secret=null;if(failure.Length==0)failure="Vault locked; protected result discarded.";}
-                    Respond(new UiResult {RequestId=work.Progress.RequestId,Kind=original!=null ? original.Kind : work.Progress.Kind=="Capture" || work.Progress.Kind=="EvidenceReclassify" ? "Review" : work.Progress.Kind,Success=failure.Length==0,Error=failure,Value=original!=null ? original.Message : receipt==null ? value as string : receipt.Message,IdentityPreview=value as IdentityResolutionPreview,Evidence=secret,GroupIds=original==null ? null : original.GroupIds,OperationId=original!=null ? original.OperationId : receipt==null ? null : receipt.OperationId,Reconciled=original!=null ? original.Reconciled : receipt!=null && receipt.Reconciled,ReviewRevisions=original==null ? null : original.ReviewRevisions});
-                    if(!vaultUnlocked)ClearVaultWorker();
-                    lock(operationGate){CleanOperation(work);work.Cancel.Dispose();work.Cancel=null;}
+                    var secret=value as EvidenceInspection;
+                    try {
+                        Update(s=>{s.BusyOperation=false;s.Stage=s.RunningScan ? "Scanning" : "Ready";});
+                        var receipt=value as IdentityResolutionReceipt;
+                        var original=value as OriginalReceipt;
+                        if(secret!=null && (failure.Length!=0 || !vaultUnlocked || secret.Epoch!=VaultGeneration)){secret.Dispose();secret=null;if(failure.Length==0)failure="Vault locked; protected result discarded.";}
+                        Respond(new UiResult {RequestId=work.Progress.RequestId,Kind=original!=null ? original.Kind : work.Progress.Kind=="Capture" || work.Progress.Kind=="EvidenceReclassify" ? "Review" : work.Progress.Kind,Success=failure.Length==0,Error=failure,Value=original!=null ? original.Message : receipt==null ? value as string : receipt.Message,IdentityPreview=value as IdentityResolutionPreview,Evidence=secret,GroupIds=original==null ? null : original.GroupIds,OperationId=original!=null ? original.OperationId : receipt==null ? null : receipt.OperationId,Reconciled=original!=null ? original.Reconciled : receipt!=null && receipt.Reconciled,ReviewRevisions=original==null ? null : original.ReviewRevisions});
+                    } catch(Exception error) {
+                        // Delivering the result is not part of the operation. A failure here is recorded on the
+                        // operation and the worker keeps serving the queue instead of stopping until reopen.
+                        if(secret!=null){secret.Dispose();secret=null;}
+                        string message="Operation finished, but its result could not be delivered to the window: "+error.Message;
+                        lock(operationGate){work.Progress.State="failed";work.Progress.Error=message;work.Progress.Stage=message;}
+                        Update(s=>{s.BusyOperation=false;s.Error=message;});
+                        // The window clears its pending request only when a UiResult with this id arrives, so deliver a
+                        // small failure result. If even that cannot be queued, the exception reaches FailOperations as before.
+                        var failed=value as OriginalReceipt;
+                        Respond(new UiResult {RequestId=work.Progress.RequestId,Kind=failed!=null ? failed.Kind : work.Progress.Kind=="Capture" || work.Progress.Kind=="EvidenceReclassify" ? "Review" : work.Progress.Kind,Success=false,Error=message,GroupIds=failed==null ? null : failed.GroupIds,OperationId=failed==null ? null : failed.OperationId});
+                    } finally {
+                        if(!vaultUnlocked)ClearVaultWorker();
+                        lock(operationGate){CleanOperation(work);work.Cancel.Dispose();work.Cancel=null;}
+                    }
                 }
             }} catch(Exception error){FailOperations(error);}finally{InvalidateVault();ClearVaultWorker();}
         }

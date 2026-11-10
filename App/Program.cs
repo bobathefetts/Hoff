@@ -37,6 +37,28 @@ namespace MediaReviewer {
             return window;
         }
 
+        static DateTime lastUnhandledReport;static string lastUnhandledMessage;static bool reportingUnhandled;
+        // Keep the review session alive after an exception on the UI thread. Catalog state lives in SQLite
+        // transactions, so continuing is safe, while a crash would lose the reviewer's place and queue.
+        // The window smoke test stays unhandled so a regression fails the run instead of being logged, and so
+        // does an exception during the one-way shutdown sequence, where swallowing it would leave a window
+        // that can never close.
+        static void AttachUnhandledExceptionHandlers(Application app,bool interactive,Func<bool> shuttingDown) {
+            AppDomain.CurrentDomain.UnhandledException+=(s,e)=>Console.Error.WriteLine("Unhandled exception: "+e.ExceptionObject);
+            System.Threading.Tasks.TaskScheduler.UnobservedTaskException+=(s,e)=>{Console.Error.WriteLine("Unobserved task exception: "+e.Exception);e.SetObserved();};
+            app.DispatcherUnhandledException+=(s,e)=>{
+                Console.Error.WriteLine("Dispatcher exception: "+e.Exception);
+                if(!interactive || shuttingDown())return;
+                e.Handled=true;
+                string message=e.Exception.GetBaseException().Message;
+                // One dialog at a time, and one per distinct message per ten seconds, so a repeating timer fault
+                // cannot stack dialogs while the first one is still open.
+                if(reportingUnhandled || (message==lastUnhandledMessage && DateTime.UtcNow-lastUnhandledReport<TimeSpan.FromSeconds(10)))return;
+                lastUnhandledMessage=message;lastUnhandledReport=DateTime.UtcNow;reportingUnhandled=true;
+                try{MessageBox.Show(message,"Media Compliance Reviewer · unexpected error",MessageBoxButton.OK,MessageBoxImage.Error);}catch(Exception){}finally{reportingUnhandled=false;}
+            };
+        }
+
         [STAThread] static int Main() {
             AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling",false);
             AppContext.SetSwitch("Switch.System.IO.BlockLongPaths",false);
@@ -63,6 +85,7 @@ namespace MediaReviewer {
                 if(mode!=null && mode!="--window-smoke" && ((mode!="--database" && mode!="--open-evidence-package") || args.Length!=2))throw new ArgumentException("Use --database with a local SQLite path, --open-evidence-package with a package path, or launch without arguments.");
                 var app=new Application();
                 using(var controller=new ReviewerWindow(ReadWindow(),mode!="--window-smoke")) {
+                    AttachUnhandledExceptionHandlers(app,mode!="--window-smoke",()=>controller.IsClosing);
                     if(mode==null)controller.Window.Loaded+=(s,e)=>controller.Window.Dispatcher.BeginInvoke(new Action(()=>controller.ShowStartupCatalog()));
                     if(mode=="--database")controller.Open(args[1],false);
                     if(mode=="--open-evidence-package")controller.Window.Loaded+=(s,e)=>controller.Window.Dispatcher.BeginInvoke(new Action(()=>{

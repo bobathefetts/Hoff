@@ -393,7 +393,12 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
       o.path) : null, o.path];
     for (const path of paths) {
       const url = C.fileUrlFromPath(path);
-      if (url) return url;
+      // Only a drive-letter location (file:///C:/...) is loaded automatically. Any other file URL,
+      // including every UNC spelling (file://server/share, file:////server/share, file:///\\server\share),
+      // would make the browser contact that host over SMB as soon as the inspector renders, so a shared
+      // catalog could leak Windows credentials to whoever wrote its root paths. A rejected location
+      // returns null instead of falling through to a guessed path relative to this page.
+      if (url) return /^file:\/\/\/[a-z]:\/(?![\\/])/i.test(url) ? url : null;
     }
     if (location.protocol === 'file:' && root.label && o.path) {
       try {
@@ -1734,15 +1739,18 @@ const MEDIA_DATABASE_SCHEMA = "CREATE TABLE IF NOT EXISTS app_meta (key TEXT PRI
   }
   async function snapshotEvidenceWorkspaceItem(key) {
     const decision = await ws.decisions[key],hash = decision?.hash,rootId = decision?.rootId,
-      occurrences = await rootOccurrences(rootId, hash),contentExists = Boolean(hash &&
-      Object.prototype.hasOwnProperty.call(ws.contents, hash)),metadata =
+      occurrences = await rootOccurrences(rootId, hash),
+      // ws.contents is an asynchronous record store, not a plain object: a hasOwnProperty check always
+      // reports false, and the rollback below would then delete the content record. Read the record.
+      existingContent = hash ? await ws.contents[hash] : undefined,
+      contentExists = Boolean(existingContent),metadata =
       evidenceMetadataCache.get(key),preview = evidencePreviewCache.get(key);
     return {
       key, rootId, hash, decision: decision ? {
         ...decision
       } :
       null, contentExists, content: contentExists ? {
-        ...(await ws.contents[hash])
+        ...existingContent
       } :
       null, occurrences: occurrences.map((item) => ({
         ...item

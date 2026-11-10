@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
+    <!-- build.ps1 compiles with the .NET Framework csc.exe, which accepts C# 5 only. Keep the IDE in step. -->
+    <LangVersion>5</LangVersion>
     <OutputType>Exe</OutputType>
     <PlatformTarget>x64</PlatformTarget>
     <UseWPF>true</UseWPF>

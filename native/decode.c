@@ -133,6 +133,7 @@ render:
     }
     *width = (int)FFMAX(1, av_rescale(w, lo, longest));
     *height = (int)FFMAX(1, av_rescale(h, lo, longest));
+    *rotation = 0;
     const AVPacketSideData *matrix = av_packet_side_data_get(parameters->coded_side_data,
             parameters->nb_coded_side_data, AV_PKT_DATA_DISPLAYMATRIX);
     if (matrix && matrix->size >= 9 * sizeof(int32_t)) {

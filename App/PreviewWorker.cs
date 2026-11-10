@@ -13,7 +13,7 @@ static class DecoderProgram {
     }
     internal static int Run(){
         try{
-            SetErrorMode(0x8003);var input=new BinaryReader(Console.OpenStandardInput(),Encoding.UTF8);var output=new BinaryWriter(Console.OpenStandardOutput(),Encoding.UTF8);if(input.ReadInt32()!=0x4d435253)throw new InvalidDataException("Decoder parent release message is missing");output.Write(0x4d435244);output.Write(6);output.Flush();
+            SetErrorMode(0x8003);var input=new BinaryReader(WorkerInput.Open(),Encoding.UTF8);var output=new BinaryWriter(Console.OpenStandardOutput(),Encoding.UTF8);if(input.ReadInt32()!=0x4d435253)throw new InvalidDataException("Decoder parent release message is missing");output.Write(0x4d435244);output.Write(6);output.Flush();
             for(int count=0;count<100;count++){
                 int kind;try{kind=input.ReadInt32();}catch(EndOfStreamException){return 0;}
                 string path=null,identity=null,root=null;long size=0,ticks=0;int side=256,limit=32768;byte[] saved=null;

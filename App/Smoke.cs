@@ -224,7 +224,15 @@ namespace MediaReviewer {
             player.Prepare();player.Dispose();complete("C:\\unused-closed-video.mp4",null);
             Check(viewport.Children.Count==1 && !play.IsEnabled,"A closed inspector must reject late video results.");
         }
+        // The app deliberately ignores review keys while Shift, Ctrl or Alt is physically held. Wait for a held key
+        // to be released, so someone typing in another window does not fail this test, and say so if it stays down.
+        static void WaitForReleasedModifiers() {
+            if(Keyboard.Modifiers==ModifierKeys.None)return;
+            WaitForWindow(()=>Keyboard.Modifiers==ModifierKeys.None,
+                "A modifier key (Shift, Ctrl or Alt) stayed held down during the window test. Release it and run the test again.");
+        }
         static bool InspectionArrow(Window window,Key key) {
+            WaitForReleasedModifiers();
             var arrow=new KeyEventArgs(Keyboard.PrimaryDevice,PresentationSource.FromVisual(window),Environment.TickCount,key) {
                 RoutedEvent=Keyboard.PreviewKeyDownEvent
             };
@@ -249,8 +257,13 @@ namespace MediaReviewer {
             button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Check(sidebar.IsVisible && !compact.IsVisible,"The left sidebar must expand again.");
         }
-        static void QuickArrow(Window window,Key key) {
+        // waitForModifiers pumps the dispatcher, so a caller that has queued work for a dialog the key opens
+        // must wait for itself first and pass false.
+        static void QuickArrow(Window window,Key key,bool waitForModifiers=true) {
             var host=(FrameworkElement)window.FindName("QuickImageHost");
+            // Activating first lets Windows bring this thread's key state up to date before it is checked.
+            window.Activate();
+            if(waitForModifiers)WaitForReleasedModifiers();
             window.Activate();host.Focus();
             Check(host.IsKeyboardFocusWithin,"The Quick Review image must accept keyboard focus.");
             var arrow=new KeyEventArgs(Keyboard.PrimaryDevice,PresentationSource.FromVisual(host),Environment.TickCount,key) {
@@ -298,6 +311,8 @@ namespace MediaReviewer {
             Check(next!=null && inspection.Title=="Inspect · "+next.Name,"Inspect must advance after a successful classification.");
             inspection.Close();
             bool unlocked=false;
+            // Wait here, before queuing the dialog helper: waiting later would run the helper before its dialog exists.
+            window.Activate();WaitForReleasedModifiers();
             var prompt=window.Dispatcher.BeginInvoke(new Action(()=>{
                 var dialog=window.OwnedWindows.OfType<Window>().SingleOrDefault(w=>w.Title=="Unlock stored originals" && w.IsVisible);
                 if(dialog==null)return;
@@ -307,7 +322,7 @@ namespace MediaReviewer {
                 panel.Children.OfType<WrapPanel>().Single().Children.OfType<Button>().Single(b=>b.IsDefault)
                     .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             }));
-            QuickArrow(window,Key.Down);
+            QuickArrow(window,Key.Down,false);
             if(!unlocked)prompt.Abort();
             Check(unlocked,"Down did not open the protected review prompt.");
         }
@@ -440,8 +455,9 @@ namespace MediaReviewer {
                     GroupId=id,ContentId=row.ContentId,ExpectedRevision=undo.ExpectedRevision,
                     OperationId=Guid.NewGuid().ToString("N"),Reviewer="fixture",Notes="smoke test"
                 }));
-                Check(!WaitForResult(engine,engine.RequestUndoReview(new[]{undo},Guid.NewGuid().ToString("N"))).Success,
-                    "Undo should reject an intervening notes edit.");
+                var staleUndo=WaitForResult(engine,engine.RequestUndoReview(new[]{undo},Guid.NewGuid().ToString("N")));
+                Check(!staleUndo.Success,"Undo should reject an intervening notes edit.");
+                Check(staleUndo.ReviewChanged,"A stale Undo must be flagged as permanently changed so the window can drop it.");
                 var current=Result(engine,engine.RequestPage(new PageRequest {Generation=2,Bucket="COMPLIANT"})).Page;
                 Check(current.Rows.Single().GroupId==id,"Review did not persist the group identity.");
                 Check(Result(engine,engine.RequestPage(new PageRequest {Generation=3,Bucket="COMPLIANT",Search="fixture",Sort="reviewer",SortDescending=true})).Page.Rows.Single().GroupId==id,"The paged reviewer search did not find a saved label.");
@@ -562,6 +578,8 @@ namespace MediaReviewer {
                 CheckPageRefresh(engine,batch,quickRoot,quickFolder);
             }
             CheckRenamed(directory,image);
+            CheckArchiveMembers(directory,image);
+            CheckReconnectAllCandidates(directory,image);
             CheckCrossRootCopies(directory,image);
             CheckMixedFingerprints(directory,image);
             CheckRecordedCopyFallback(directory,image);
@@ -879,6 +897,154 @@ namespace MediaReviewer {
                 var row=Result(engine,engine.RequestPage(new PageRequest{Generation=2,Type="png"})).Page.Rows.Single();
                 Check(row.Name=="renamed.dat" && row.SourcePath==renamed && row.Extension=="png" && row.Algorithm=="sha256" && row.PreviewBytes!=null,"Renamed media did not retain its true filename, media family, preview and full hash.");
                 Check(Result(engine,engine.RequestPage(new PageRequest{Generation=3,Filter="renamed"})).Page.Total==1,"The renamed smart filter did not isolate the mismatched extension item.");
+            }
+        }
+        // One refused member must not hide the rest of a ZIP, and a renamed picture inside a ZIP must still be found.
+        static void CheckArchiveMembers(string directory,string image) {
+            string root=Directory.CreateDirectory(Path.Combine(directory,"archive-members")).FullName;
+            string folder=Directory.CreateDirectory(Path.Combine(root,"example.user")).FullName;
+            byte[] picture=File.ReadAllBytes(image),renamed=File.ReadAllBytes(image);
+            Array.Resize(ref renamed,renamed.Length+1);
+            using(var output=File.Create(Path.Combine(folder,"mixed.zip")))
+            using(var zip=new System.IO.Compression.ZipArchive(output,System.IO.Compression.ZipArchiveMode.Create)){
+                Action<string,byte[]> add=(name,bytes)=>{using(var entry=zip.CreateEntry(name).Open())entry.Write(bytes,0,bytes.Length);};
+                add("photo.png",picture);
+                add("renamed.dat",renamed);
+                add("document.dat",System.Text.Encoding.ASCII.GetBytes("<?xml version=\"1.0\"?><document>ordinary content</document>"));
+                // Two megabytes of zeros compress far beyond the 100:1 member limit.
+                add("blank.png",new byte[2*1024*1024]);
+                add("inner.zip",new byte[]{80,75,5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0});
+            }
+            // Eight refused members in one ZIP: all are counted, but only the first five and one summary line are logged.
+            using(var output=File.Create(Path.Combine(folder,"nested-only.zip")))
+            using(var zip=new System.IO.Compression.ZipArchive(output,System.IO.Compression.ZipArchiveMode.Create))
+                for(int i=1;i<=8;i++)using(var entry=zip.CreateEntry("n"+i+".zip").Open())entry.Write(new byte[]{80,75,5,6,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},0,22);
+            string database=Path.Combine(directory,"archive-members.sqlite");
+            using(var engine=ReviewerEngine.Open(database,true)){
+                Wait(()=>engine.Ready || engine.Faulted);Check(engine.Ready,engine.Status.Error);
+                engine.StartScan(new ScanOptions {RootPath=root,Extensions=new[]{"png"},WorkerCount=1,ScanArchives=true,FingerprintPolicy=FingerprintPolicy.Full()});
+                Wait(()=>!engine.Status.RunningScan);
+                var rows=Result(engine,engine.RequestPage(new PageRequest{Generation=1})).Page.Rows;
+                Check(rows.Count==2 && rows.Any(r=>r.Name=="photo.png" && r.PreviewBytes!=null),
+                    "A ZIP with one refused member must still catalogue its ordinary media.");
+                Check(rows.Any(r=>r.Name=="renamed.dat" && r.Extension=="png" && r.Algorithm=="sha256" && r.PreviewBytes!=null),
+                    "Renamed media inside a ZIP was not detected from its header.");
+                using(var reader=new SqliteConnection(database,true)){
+                    var failed=reader.Query("SELECT path,error FROM jobs WHERE state='failed' AND path LIKE '%mixed.zip%' ORDER BY path",new object[0],10);
+                    Check(failed.Count==2 &&
+                        ((string)failed[0][0]).EndsWith("blank.png",StringComparison.Ordinal) && ((string)failed[0][1]).Contains("size/ratio") &&
+                        ((string)failed[1][0]).EndsWith("inner.zip",StringComparison.Ordinal) && ((string)failed[1][1]).Contains("Nested archives"),
+                        "Refused ZIP members must each be reported as a failed file with the reason.");
+                    Check(Convert.ToInt64(reader.Scalar("SELECT COUNT(*) FROM jobs WHERE kind='archive' AND state='complete'"))==2 &&
+                        (string)reader.Scalar("SELECT state FROM jobs WHERE path LIKE '%document.dat'")=="skipped",
+                        "Each ZIP itself must complete, and a non-media member must be skipped quietly.");
+                    Check(Convert.ToInt64(reader.Scalar("SELECT COUNT(*) FROM jobs WHERE state='failed' AND path LIKE '%nested-only.zip%'"))==8 &&
+                        Convert.ToInt64(reader.Scalar("SELECT COUNT(*) FROM diagnostics WHERE path LIKE '%nested-only.zip%'"))==6 &&
+                        Convert.ToInt64(reader.Scalar("SELECT COUNT(*) FROM diagnostics WHERE path LIKE '%nested-only.zip' AND message LIKE '3 more members%'"))==1,
+                        "Refused members must all be counted while the log keeps five lines and one summary per ZIP.");
+                }
+                Check(engine.Status.FailedFiles==10,"Refused ZIP members must make the scan report errors.");
+            }
+        }
+        // Reconnect all must not bind a sampled-hash (quick candidate) match unless that was explicitly accepted.
+        static void CheckReconnectAllCandidates(string directory,string image) {
+            string source=Path.Combine(directory,"reconnect-all-source"),copy=Path.Combine(directory,"reconnect-all-copy");
+            string folder=Directory.CreateDirectory(Path.Combine(source,"example.user")).FullName;
+            File.Copy(image,Path.Combine(folder,"full.png"));
+            string database=Path.Combine(directory,"reconnect-all.sqlite");
+            const string unverified="Unvalidated reconnected source";
+            using(var engine=ReviewerEngine.Open(database,true)){
+                Wait(()=>engine.Ready || engine.Faulted);Check(engine.Ready,engine.Status.Error);
+                var options=new ScanOptions {RootPath=source,Extensions=new[]{"png"},WorkerCount=1,FingerprintPolicy=FingerprintPolicy.Full()};
+                engine.StartScan(options);Wait(()=>!engine.Status.RunningScan);
+                byte[] bytes=File.ReadAllBytes(image);Array.Resize(ref bytes,bytes.Length+1);
+                File.WriteAllBytes(Path.Combine(folder,"sampled.png"),bytes);
+                options.FingerprintPolicy=new FingerprintPolicy {ThresholdBytes=0};
+                engine.StartScan(options);Wait(()=>!engine.Status.RunningScan);
+                var rows=Result(engine,engine.RequestPage(new PageRequest {Generation=1})).Page.Rows;
+                Check(rows.Count==2 && rows.Count(r=>r.Algorithm=="sha256")==1 && rows.Count(r=>r.Algorithm=="sampled-sha256-v1")==1,
+                    "The reconnect fixture needs one full and one sampled fingerprint.");
+                string copied=Directory.CreateDirectory(Path.Combine(copy,"example.user")).FullName;
+                foreach(string name in new[]{"full.png","sampled.png"})File.Copy(Path.Combine(folder,name),Path.Combine(copied,name));
+                Func<string,string> identity=name=>{
+                    using(var reader=new SqliteConnection(database,true))
+                        return (string)reader.Scalar("SELECT file_identity FROM bound_occurrences WHERE name=? AND superseded=0",name);
+                };
+                string first=engine.RequestReconnectAll(copy);Result(engine,first);
+                var batch=Result(engine,engine.RequestReconnectAllStatus(first)).Reconnection;
+                Check(batch.State=="complete" && batch.ConnectedRoots==1 && batch.Full==1 && batch.Candidates==0 && batch.Unaccepted==1,
+                    "Reconnect all must bind full matches only unless quick candidates are accepted: "+batch.Summary);
+                Check(identity("full.png")!=unverified && identity("sampled.png")==unverified,
+                    "An unaccepted quick candidate was bound to its saved review.");
+                string second=engine.RequestReconnectAll(copy,true);Result(engine,second);
+                batch=Result(engine,engine.RequestReconnectAllStatus(second)).Reconnection;
+                Check(batch.State=="complete" && batch.ConnectedRoots==1 && batch.Full==1 && batch.Candidates==1 && batch.Unaccepted==0,
+                    "Reconnect all with quick candidates accepted must bind them: "+batch.Summary);
+                Check(identity("full.png")!=unverified && identity("sampled.png")!=unverified,
+                    "An explicitly accepted quick candidate was left unverified.");
+                // Running it again on the same folder without the option must not revoke what was accepted for the same file.
+                string third=engine.RequestReconnectAll(copy);Result(engine,third);
+                batch=Result(engine,engine.RequestReconnectAllStatus(third)).Reconnection;
+                Check(batch.ConnectedRoots==1 && batch.Full==1 && batch.Candidates==1 && batch.Unaccepted==0 && identity("sampled.png")!=unverified,
+                    "Repeating Reconnect all on the same folder revoked an accepted quick candidate: "+batch.Summary);
+                // A different folder holds different files, so the earlier acceptance does not carry over, and an
+                // unaccepted candidate must not lend its own timestamp to the recorded location.
+                string moved=Path.Combine(directory,"reconnect-all-moved");
+                string movedFolder=Directory.CreateDirectory(Path.Combine(moved,"example.user")).FullName;
+                foreach(string name in new[]{"full.png","sampled.png"})File.Copy(Path.Combine(folder,name),Path.Combine(movedFolder,name));
+                File.SetLastWriteTimeUtc(Path.Combine(movedFolder,"sampled.png"),new DateTime(2001,2,3,4,5,6,DateTimeKind.Utc));
+                string fourth=engine.RequestReconnectAll(moved);Result(engine,fourth);
+                batch=Result(engine,engine.RequestReconnectAllStatus(fourth)).Reconnection;
+                Check(batch.ConnectedRoots==1 && batch.Full==1 && batch.Candidates==0 && batch.Unaccepted==1 && identity("sampled.png")==unverified,
+                    "A quick candidate in a new folder was bound without acceptance: "+batch.Summary);
+                using(var reader=new SqliteConnection(database,true))
+                    Check(Convert.ToInt64(reader.Scalar("SELECT b.modified_ticks=o.modified_ticks FROM bound_occurrences b JOIN occurrences o ON o.id=b.id WHERE b.name='sampled.png' AND b.superseded=0"))==1,
+                        "An unaccepted quick candidate changed the recorded modified time.");
+                // Rescanning the new folder reads the file and so verifies it. Repeating Reconnect all there, still
+                // without acceptance, must keep that instead of marking the file unverified again.
+                engine.StartScan(new ScanOptions {RootPath=moved,Extensions=new[]{"png"},WorkerCount=1,FingerprintPolicy=new FingerprintPolicy {ThresholdBytes=0}});
+                Wait(()=>!engine.Status.RunningScan);
+                Check(String.IsNullOrEmpty(engine.Status.Error) && identity("sampled.png")!=unverified,"Rescanning the reconnected folder did not verify its quick candidate: "+engine.Status.Error);
+                string fifth=engine.RequestReconnectAll(moved);Result(engine,fifth);
+                batch=Result(engine,engine.RequestReconnectAllStatus(fifth)).Reconnection;
+                Check(batch.ConnectedRoots==1 && batch.Full==1 && batch.Candidates==1 && batch.Unaccepted==0 && identity("sampled.png")!=unverified,
+                    "Repeating Reconnect all un-verified a file that a rescan had verified: "+batch.Summary);
+                // A check that was applied by hand in Sources, with its candidates accepted there, must survive the
+                // resume of an interrupted Reconnect all that still lists it, even when the resume declines candidates.
+                string rootId=rows[0].RootId;
+                string manual=engine.RequestRootRemap(rootId,copy,false);Result(engine,manual);
+                Result(engine,engine.RequestApplySourceConnection(manual,true));
+                Check(identity("sampled.png")!=unverified,"A candidate accepted in Sources was not bound.");
+                string interrupted=Guid.NewGuid().ToString("N");
+                engine.WaitWrite(writer=>{
+                    writer.Execute("INSERT INTO source_reconnect_batches(id,path,state,created_at,root_ceiling,manifest_complete) VALUES(?,?,'interrupted',?,(SELECT COALESCE(MAX(rowid),0) FROM roots),1)",interrupted,copy,Catalog.Now());
+                    writer.Execute("INSERT INTO source_reconnect_items(batch_id,root_id,root_order,state,connection_id) VALUES(?,?,1,'checking',?)",interrupted,rootId,manual);
+                    return null;
+                });
+                Result(engine,engine.RequestResumeReconnectAll(interrupted));
+                batch=Result(engine,engine.RequestReconnectAllStatus(interrupted)).Reconnection;
+                Check(batch.State=="complete" && batch.ConnectedRoots==1 && batch.Candidates==1 && batch.Unaccepted==0 && identity("sampled.png")!=unverified,
+                    "Resuming Reconnect all revoked candidates that were accepted in Sources: "+batch.Summary);
+            }
+            // A root matched only by quick candidates stays unconnected until they are accepted.
+            string sampledSource=Path.Combine(directory,"reconnect-sampled-source"),sampledCopy=Path.Combine(directory,"reconnect-sampled-copy");
+            string sampledFolder=Directory.CreateDirectory(Path.Combine(sampledSource,"example.user")).FullName;
+            File.Copy(image,Path.Combine(sampledFolder,"only.png"));
+            File.Copy(image,Path.Combine(Directory.CreateDirectory(Path.Combine(sampledCopy,"example.user")).FullName,"only.png"));
+            using(var engine=ReviewerEngine.Open(Path.Combine(directory,"reconnect-sampled.sqlite"),true)){
+                Wait(()=>engine.Ready || engine.Faulted);Check(engine.Ready,engine.Status.Error);
+                engine.StartScan(new ScanOptions {RootPath=sampledSource,Extensions=new[]{"png"},WorkerCount=1,FingerprintPolicy=new FingerprintPolicy {ThresholdBytes=0}});
+                Wait(()=>!engine.Status.RunningScan);
+                string first=engine.RequestReconnectAll(sampledCopy);Result(engine,first);
+                var batch=Result(engine,engine.RequestReconnectAllStatus(first)).Reconnection;
+                Check(batch.ConnectedRoots==0 && batch.Candidates==0 && batch.Unaccepted==1 && batch.Summary.Contains("were not accepted"),
+                    "A root matched only by quick candidates must stay unconnected: "+batch.Summary);
+                Check(Result(engine,engine.RequestPage(new PageRequest {Generation=1})).Page.Rows.Single().SourcePath==Path.Combine(sampledFolder,"only.png"),
+                    "An unaccepted quick candidate moved the saved location.");
+                string second=engine.RequestReconnectAll(sampledCopy,true);Result(engine,second);
+                batch=Result(engine,engine.RequestReconnectAllStatus(second)).Reconnection;
+                Check(batch.ConnectedRoots==1 && batch.Candidates==1 && batch.Unaccepted==0,
+                    "Accepted quick candidates must connect the root: "+batch.Summary);
             }
         }
         internal static int PreviewFiles(IEnumerable<string> paths) {
