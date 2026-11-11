@@ -43,6 +43,7 @@ try {
     if($PlaybackFixtures){$selfTest+=' "' + (Resolve-Path -LiteralPath $PlaybackFixtures).Path + '"'}
     Invoke-Check $selfTest
     Invoke-Check ('--window-smoke "' + (Join-Path $scratch.FullName 'review.sqlite') + '"')
+    Invoke-Check ('--first-scan-smoke "' + $scratch.FullName + '"')
     $cliDatabase = Join-Path $scratch.FullName 'command-line.sqlite'
     Invoke-Check ('--create-database "' + $cliDatabase + '"')
     Invoke-Check ('--database "' + $cliDatabase + '" --scan-root "' + (Join-Path $scratch.FullName 'home-share') + '" --extensions png --full-hash --workers 1')

@@ -59,6 +59,26 @@ namespace MediaReviewer {
         void Message(string value){Text("MessageText",value);}
         bool Ready {get{return engine!=null && engine.Ready && !engine.Faulted && !closing && !switchingCatalog;}}
         internal bool IsClosing {get{return closing;}}
+        // The app no longer asks for a catalog at startup. The first scan creates this one, and later launches reopen it.
+        // It lives in the user's local profile because a catalog must be on local storage that no sync client rewrites.
+        internal static string DefaultCatalogOverride;
+        internal static string DefaultCatalogPath {get{
+            if(DefaultCatalogOverride!=null)return DefaultCatalogOverride;
+            string profile=Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+            if(String.IsNullOrEmpty(profile))profile=AppDomain.CurrentDomain.BaseDirectory;
+            return Path.Combine(profile,"Media Compliance Reviewer","Media Review Catalog.sqlite");
+        }}
+        // The scan that is waiting for the default catalog to finish opening.
+        Action pendingStart;
+        bool pageBoxEditing;
+        string pageBoxShown="1";
+        internal string CatalogPath {get{return engine==null ? null : engine.DatabasePath;}}
+        internal bool ScanSettled {get{return Ready && pendingStart==null && status!=null && !status.RunningScan && status.ProcessedFiles>0;}}
+        internal void OpenDefaultCatalogIfPresent() {
+            string path=DefaultCatalogPath;
+            if(File.Exists(path))Guard(()=>Open(path,false));
+        }
+        void RunPendingStart(){var start=pendingStart;pendingStart=null;if(start!=null)Guard(start);}
         static string Id(){return Guid.NewGuid().ToString("N");}
 
         internal ReviewerWindow(Window window,bool persistWorkspace=true) {
@@ -82,7 +102,14 @@ namespace MediaReviewer {
             Combo("ViewBox").SelectionChanged+=(s,e)=>{if(Combo("ViewBox").SelectedIndex>=0){bucket=Combo("ViewBox").SelectedIndex;NewPage(1);}};
             Click("FilterButton",()=>NewPage(1));Click("ResetButton",ResetView);
             Click("PreviousButton",()=>NewPage(page-1));Click("NextButton",()=>NewPage(page+1));Click("GoButton",GoToPage);
-            Box("PageBox").KeyDown+=(s,e)=>{if(e.Key==Key.Enter){e.Handled=true;Guard(GoToPage);}};
+            var pageBox=Box("PageBox");var goButton=Button("GoButton");
+            pageBox.KeyDown+=(s,e)=>{if(e.Key==Key.Enter){e.Handled=true;Guard(GoToPage);}};
+            // Typing a page number: the first click selects the old number so the new one replaces it, and the entry is
+            // kept (through the click on Jump) until it is used or the reviewer moves on to something else.
+            pageBox.GotKeyboardFocus+=(s,e)=>{pageBoxEditing=true;pageBox.SelectAll();};
+            pageBox.PreviewMouseLeftButtonDown+=(s,e)=>{if(!pageBox.IsKeyboardFocusWithin){e.Handled=true;pageBox.Focus();}};
+            pageBox.LostKeyboardFocus+=(s,e)=>{if(!ReferenceEquals(e.NewFocus,goButton))EndPageEdit();};
+            goButton.LostKeyboardFocus+=(s,e)=>{if(!ReferenceEquals(e.NewFocus,pageBox))EndPageEdit();};
             Box("SearchBox").KeyDown+=(s,e)=>{if(e.Key==Key.Enter){e.Handled=true;NewPage(1);}};
             Combo("PageSizeBox").SelectionChanged+=(s,e)=>NewPage(1);
             Combo("SortBox").SelectionChanged+=(s,e)=>{columnSort=null;NewPage(1);};
@@ -200,6 +227,7 @@ namespace MediaReviewer {
         void StartOpen(string path,bool create,string html) {
             if(inspector!=null)inspector.Close();
             if(protectedWindow!=null)protectedWindow.Close();
+            pendingStart=null;
             ClearCards();pending.Clear();undoStack.Clear();view.Advance();page=1;quickIndex=0;bucket=0;revision=-1;status=null;pageRequest=null;
             Combo("ViewBox").SelectedIndex=0;
             marqoThreshold=DraftReview.DefaultMarqoThreshold;gemmaThreshold=DraftReview.DefaultGemmaThreshold;gemmaCriteria="";useGemma=false;gemmaCpuOnly=false;gemmaSettingsLoaded=false;gemmaAvailable=DraftModelWorker.GemmaAvailable();
@@ -214,7 +242,7 @@ namespace MediaReviewer {
         void LoadPreferences() {
             Button("RetryPreferencesButton").Visibility=Visibility.Hidden;
             Queue(engine.RequestPreferences(),r=>{
-                if(!r.Success){Text("PreferencesText","Preferences unavailable: "+r.Error);Button("RetryPreferencesButton").Visibility=Visibility.Visible;return;}
+                if(!r.Success){Text("PreferencesText","Preferences unavailable: "+r.Error);Button("RetryPreferencesButton").Visibility=Visibility.Visible;RunPendingStart();return;}
                 savedPreferences=r.Preferences;preferencesSignature=r.Preferences.Signature;
                 Combo("PageSizeBox").SelectedItem=r.Preferences.PageSize;
                 Combo("WorkerBox").SelectedItem=r.Preferences.WorkerCount;
@@ -227,6 +255,7 @@ namespace MediaReviewer {
                 options.DefaultSourceRoot=r.Preferences.DefaultSourceRoot;
                 if(String.IsNullOrWhiteSpace(Box("SourceBox").Text))Box("SourceBox").Text=options.DefaultSourceRoot;
                 Text("PreferencesText",String.IsNullOrEmpty(r.Preferences.Warning) ? "Preferences loaded for this database." : r.Preferences.Warning);
+                RunPendingStart();
             });
         }
 
@@ -247,14 +276,52 @@ namespace MediaReviewer {
                 ExcludeApplicationData=mode!="Deep" && !options.IncludeApplicationData,IncludeRootFiles=options.IncludeRootFiles,ScanArchives=options.ScanArchives,SniffRenamed=options.SniffRenamed,
                 FingerprintPolicy=options.FullHashScans ? FingerprintPolicy.Full() : new FingerprintPolicy(),
                 Extensions=mode=="Quick" ? Formats.Quick : mode=="Deep" ? Formats.Deep : options.Families.SelectMany(Formats.Filter).ToArray()};
-            engine.StartScan(request);Message("Scan queued…");
+            if(engine!=null){engine.StartScan(request);Message("Scan queued…");return;}
+            // No catalog is open: create the default one (or reopen it) and start this scan as soon as it is ready.
+            if(String.IsNullOrWhiteSpace(request.RootPath))throw new ArgumentException("Choose a folder to scan first.");
+            string path=DefaultCatalogPath;
+            Directory.CreateDirectory(Path.GetDirectoryName(path));
+            // Opening a catalog loads its saved preferences into these controls. Keep what is on screen for this scan.
+            string source=Box("SourceBox").Text,age=Box("AgeBox").Text;int modeIndex=Combo("ModeBox").SelectedIndex;object workers=Combo("WorkerBox").SelectedItem;
+            var chosen=options.Copy();
+            StartOpen(path,IsNewCatalogPath(path),null);
+            pendingStart=()=>{
+                Box("SourceBox").Text=source;Box("AgeBox").Text=age;Combo("ModeBox").SelectedIndex=modeIndex;Combo("WorkerBox").SelectedItem=workers;
+                options.Families=chosen.Families;options.IncludeApplicationData=chosen.IncludeApplicationData;options.IncludeRootFiles=chosen.IncludeRootFiles;
+                options.ScanArchives=chosen.ScanArchives;options.SniffRenamed=chosen.SniffRenamed;options.FullHashScans=chosen.FullHashScans;
+                engine.StartScan(request);Message("Scan queued…");
+            };
+            Message("Creating your catalog…");
         }
 
         void SelectAll(bool value){foreach(CardItem card in cards)if(card.CanSelect)card.IsSelected=value;UpdateControls();}
         CardItem[] Selected(){if(display==ReviewView.Quick){var card=QuickCard();return card!=null && card.CanSelect ? new[]{card} : new CardItem[0];}return cards.Where(c=>c.IsSelected && c.CanSelect).ToArray();}
         void SetFit(){var style=new Style(typeof(Image));style.Setters.Add(new Setter(Image.StretchProperty,Tag("FitBox")=="Uniform" ? Stretch.Uniform : Stretch.UniformToFill));style.Setters.Add(new Setter(Image.HorizontalAlignmentProperty,HorizontalAlignment.Center));style.Setters.Add(new Setter(Image.VerticalAlignmentProperty,VerticalAlignment.Center));Window.Resources["ThumbnailStyle"]=style;}
         void ResetView(){Box("SearchBox").Clear();Box("FolderBox").Clear();columnSort=null;Combo("TypeBox").SelectedIndex=0;Combo("SmartFilterBox").SelectedIndex=0;Combo("SortBox").SelectedIndex=0;Combo("FitBox").SelectedIndex=0;UpdateColumnHeaders();NewPage(1);}
-        void GoToPage(){int requested;if(!Int32.TryParse(Box("PageBox").Text,out requested) || requested<1 || requested>pageCount)throw new ArgumentException("Enter a page from 1 to "+pageCount+".");NewPage(requested);}
+        void GoToPage(){
+            var box=Box("PageBox");int requested;
+            if(!Int32.TryParse(box.Text,out requested) || requested<1 || requested>pageCount){
+                // Keep the entry so it can be corrected, with the cursor back in the box.
+                box.Focus();box.SelectAll();
+                throw new ArgumentException("Enter a page from 1 to "+pageCount+".");
+            }
+            NewPage(requested);
+            pageBoxShown=box.Text;ShowPageNumber();
+            if(box.IsKeyboardFocused)box.SelectAll();
+        }
+        // The list refreshes about once a second while a scan runs. A refresh may update the page box only while it
+        // still shows the number the app last put there: a number the reviewer is typing must be left alone.
+        void ShowPageNumber(){
+            var box=Box("PageBox");
+            if(pageBoxEditing && box.Text!=pageBoxShown)return;
+            string current=page.ToString(CultureInfo.InvariantCulture);
+            pageBoxShown=current;
+            if(box.Text==current)return;
+            box.Text=current;
+            if(box.IsKeyboardFocused)box.SelectAll();
+        }
+        void EndPageEdit(){pageBoxEditing=false;ShowPageNumber();}
+        internal int CurrentPage {get{return page;}}
         void NewPage(int target){
             if(!Ready)return;
             pageSearch=Box("SearchBox").Text;pageFolder=Box("FolderBox").Text;
@@ -277,9 +344,10 @@ namespace MediaReviewer {
         }
 
         internal void ApplyPage(PageData result) {
+            bool listWasEmpty=cards.Count==0;
             revision=result.Revision;page=result.Page;
             pageCount=(int)Math.Max(1,Math.Min(Int32.MaxValue,(result.Total+result.PageSize-1)/result.PageSize));
-            Box("PageBox").Text=page.ToString(CultureInfo.InvariantCulture);
+            ShowPageNumber();
             Text("PageLabel","Page "+page+" of "+pageCount+" · "+result.Total.ToString("N0")+" matching items");
             marqoThreshold=result.MarqoThreshold;gemmaThreshold=result.GemmaThreshold;useGemma=result.UseGemma;gemmaCpuOnly=result.GemmaCpuOnly;gemmaCriteria=result.GemmaCriteria;gemmaSettingsLoaded=true;
             Button("Queue4").ToolTip="Suggestions from "+(useGemma ? "Gemma 4 E2B" : "Marqo")+", highest score first by default.";
@@ -317,7 +385,24 @@ namespace MediaReviewer {
             Text("EmptyTitle",bucket==3 && filtered ? "🔒 Evidence details require unlock" : "🎉 All clear in this view!");
             Text("EmptyText",bucket==3 && filtered ? "Clear search and filters to browse Evidence items. Unlock a saved original to view its authenticated capture details." : "Nothing matches right now — try scanning a folder, switching spaces on the left, or clearing your filters.");
             if(bucket==4 && cards.Count==0){Text("EmptyTitle","No matching AI suggestions");Text("EmptyText","Run an AI draft check on your catalog, adjust the threshold, or clear the active filters.");}
+            // A freshly filled list starts with its top item highlighted, so the first decision needs no extra click.
+            // Only then: a list that was already showing keeps whatever the reviewer selected or cleared.
+            if(listWasEmpty && display!=ReviewView.Quick && !cards.Any(c=>c.IsSelected))SelectCardAt(0);
         }
+
+        // Highlights the selectable item at or after the given position (or the last one before it) and nothing else.
+        void SelectCardAt(int index) {
+            if(cards.Count==0)return;
+            index=Math.Max(0,Math.Min(index,cards.Count-1));
+            CardItem target=cards.Skip(index).FirstOrDefault(c=>c.CanSelect)??cards.Take(index).LastOrDefault(c=>c.CanSelect);
+            if(target==null)return;
+            foreach(CardItem card in cards)card.IsSelected=ReferenceEquals(card,target);
+            if(display==ReviewView.List)Get<ListView>("ReviewList").ScrollIntoView(target);
+            else{var element=Get<ItemsControl>("CardList").ItemContainerGenerator.ContainerFromItem(target) as FrameworkElement;if(element!=null)element.BringIntoView();}
+            UpdateControls();
+        }
+        internal string[] CardNames {get{return cards.Select(c=>c.Record.Name).ToArray();}}
+        internal string[] SelectedCardNames {get{return cards.Where(c=>c.IsSelected).Select(c=>c.Record.Name).ToArray();}}
 
         void ClearCards(){CancelQuickGesture();ResetQuickPreview();foreach(var card in cards)card.PropertyChanged-=CardChanged;cards.Clear();}
         void Remove(CardItem card){
@@ -456,6 +541,7 @@ namespace MediaReviewer {
                 status.Stage,status.CompletedUsers,status.TotalUsers,status.ProcessedFiles,status.DiscoveredFiles,status.FailedFiles,status.QueueCount,status.WalBytes/1048576.0) : status.Stage);
             if(engine.Faulted && engine.DetectedHtml && pending.Count==0){OfferImport();return;}
             if(engine.Faulted && !String.IsNullOrEmpty(status.Error))Message(status.Error);
+            if(engine.Faulted)pendingStart=null;
             UiResult result;
             for(int i=0;i<8 && engine.TryTakeResult(out result);i++)DispatchResult(result);
             if(Ready && !loadedPreferences){loadedPreferences=true;Guard(LoadPreferences);}
@@ -511,7 +597,8 @@ namespace MediaReviewer {
             Text("SelectionLabel",count+" selected");
             Button("CatalogButton").IsEnabled=!closing && !switchingCatalog && closingDatabase==null && !scanning && task==null && pending.Count==0 && (engine==null || engine.Ready || engine.Faulted);
             bool drafting=ready && engine.DraftReviewActive;
-            Button("StartButton").IsEnabled=ready && !scanning && !drafting;
+            // With no catalog open, Start scan creates the default catalog first.
+            Button("StartButton").IsEnabled=(ready && !scanning && !drafting) || (engine==null && !closing && !switchingCatalog && closingDatabase==null);
             Button("ResumeButton").IsEnabled=ready && !scanning && !drafting && status!=null && !String.IsNullOrEmpty(status.ResumeId);
             Button("CancelButton").IsEnabled=ready && scanning;
             Button("AiDraftButton").IsEnabled=ready && revision>=0;

@@ -16,11 +16,80 @@ using System.Windows.Threading;
 namespace MediaReviewer {
     static class Smoke {
         const string FixturePassword="generated test password";
-        internal static void CheckStartupPrompt(Window dialog) {
-            var buttons=((WrapPanel)((StackPanel)dialog.Content).Children[2]).Children.OfType<Button>().ToArray();
-            Check(buttons.Select(b=>b.Name).SequenceEqual(new[]{"StartupCatalogButton","StartupLaterButton"}),
-                "The startup prompt must offer one catalog command and Later.");
-            dialog.Loaded+=(s,e)=>dialog.Dispatcher.BeginInvoke(new Action(()=>buttons[1].RaiseEvent(new RoutedEventArgs(Button.ClickEvent))));
+        internal static void CheckNoStartupPrompt(Window window) {
+            Check(window.OwnedWindows.Count==0,"Starting the app must not open a catalog prompt.");
+        }
+        // With no catalog open, Start scan must create the default catalog, keep the chosen folder and options, and scan.
+        // The list must then highlight its top item, and move the highlight on after each decision, with no extra click.
+        internal static void CheckFirstScanCreatesCatalog(ReviewerWindow controller,string directory) {
+            string source=Path.Combine(directory,"first-scan-source");
+            string pictures=Directory.CreateDirectory(Path.Combine(source,"example.user")).FullName;
+            byte[] picture=Convert.FromBase64String("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/3Z8AAAAASUVORK5CYII=");
+            for(int i=0;i<3;i++){byte[] bytes=(byte[])picture.Clone();Array.Resize(ref bytes,picture.Length+i);File.WriteAllBytes(Path.Combine(pictures,"picture"+(i+1)+".png"),bytes);}
+            var window=controller.Window;
+            string catalog=ReviewerWindow.DefaultCatalogPath;
+            Check(!File.Exists(catalog),"The first-scan fixture must start without a default catalog.");
+            CheckNoStartupPrompt(window);
+            var start=(Button)window.FindName("StartButton");var folder=(TextBox)window.FindName("SourceBox");var workers=(ComboBox)window.FindName("WorkerBox");
+            Check(controller.CatalogPath==null && start.IsEnabled,"Start scan must be available before any catalog is open.");
+            start.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(controller.CatalogPath==null && !File.Exists(catalog),"Start scan without a folder must not create a catalog.");
+            folder.Text=source;workers.SelectedItem=2;
+            start.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            WaitForWindow(()=>controller.ScanSettled && controller.CardNames.Length==3,"Start scan did not create the default catalog and list the scanned pictures.");
+            Check(String.Equals(controller.CatalogPath,catalog,StringComparison.OrdinalIgnoreCase) && File.Exists(catalog),"The first scan did not use the default catalog.");
+            Check(folder.Text==source && (int)workers.SelectedItem==2,"Opening the default catalog replaced the folder or options chosen for the first scan.");
+            Check(window.OwnedWindows.Count==0,"The first scan must not open a prompt.");
+            var good=(Button)window.FindName("CompliantButton");
+            for(int remaining=3;remaining>0;remaining--){
+                string[] names=controller.CardNames;
+                Check(names.Length==remaining && controller.SelectedCardNames.SequenceEqual(new[]{names[0]}) && good.IsEnabled,
+                    "The top item must be highlighted and ready to review without a click ("+remaining+" left).");
+                good.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                int expected=remaining-1;
+                WaitForWindow(()=>controller.CardNames.Length==expected,"Looks good did not save and remove the reviewed item.");
+            }
+            Check(controller.SelectedCardNames.Length==0,"An empty list must have no highlighted item.");
+            using(var database=new SqliteConnection(catalog,true))
+                Check(Convert.ToInt64(database.Scalar("SELECT COUNT(*) FROM review_groups WHERE retired=0 AND status=?","COMPLIANT"))==3,"Three highlighted items in a row were not all saved as Compliant.");
+            CheckPageBoxKeepsTyping(controller);
+        }
+        // While a scan runs the list refreshes about once a second. A refresh must not put the current page number back
+        // over a number the reviewer is typing, including between the last keystroke and the click on Jump.
+        static void CheckPageBoxKeepsTyping(ReviewerWindow controller) {
+            var window=controller.Window;
+            var box=(TextBox)window.FindName("PageBox");var jump=(Button)window.FindName("GoButton");var other=(TextBox)window.FindName("SearchBox");
+            var message=(TextBlock)window.FindName("MessageText");
+            Action refresh=()=>controller.ApplyPage(new PageData {Page=36,PageSize=60,Total=6700});
+            Func<KeyEventArgs> pressEnter=()=>{
+                var enter=new KeyEventArgs(Keyboard.PrimaryDevice,PresentationSource.FromVisual(box),Environment.TickCount,Key.Enter) {RoutedEvent=Keyboard.KeyDownEvent};
+                box.RaiseEvent(enter);return enter;
+            };
+            refresh();
+            Check(box.Text=="36" && controller.CurrentPage==36,"The page box must show the current page.");
+            window.Activate();box.Focus();
+            Check(box.IsKeyboardFocused,"The page box must accept keyboard focus.");
+            Check(box.SelectedText=="36","Entering the page box must select the old number so that typing replaces it.");
+            box.SelectedText="1";
+            refresh();
+            Check(box.Text=="1","A list refresh replaced the page number being typed.");
+            jump.Focus();refresh();
+            Check(box.Text=="1","A list refresh between typing and Jump replaced the page number.");
+            jump.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(controller.CurrentPage==1 && box.Text=="1","Jump did not go to the typed page.");
+            refresh();
+            Check(box.Text=="36","After a jump the page box must follow the current page again.");
+            box.Focus();box.SelectedText="5";
+            Check(box.Text=="5","The page box must accept a new number after a jump.");
+            other.Focus();
+            Check(box.Text=="36","Leaving the page box without jumping must restore the current page number.");
+            box.Focus();box.SelectedText="999";
+            var rejected=pressEnter();refresh();
+            Check(rejected.Handled && box.Text=="999" && box.IsKeyboardFocused && box.SelectedText=="999" && controller.CurrentPage==36 && message.Text=="Enter a page from 1 to 112.",
+                "A page number that does not exist must be explained and kept, selected, for correction.");
+            box.SelectedText="2";
+            Check(pressEnter().Handled && controller.CurrentPage==2 && box.Text=="2" && box.SelectedText=="2","Enter in the page box did not go to the typed page.");
+            other.Focus();
         }
         internal static void CheckCatalogPath(string existing) {
             string unused=Path.Combine(Path.GetDirectoryName(existing),Guid.NewGuid().ToString("N")+".sqlite");
@@ -579,6 +648,7 @@ namespace MediaReviewer {
             }
             CheckRenamed(directory,image);
             CheckArchiveMembers(directory,image);
+            CheckReviewedItemsStayReviewed(directory,image);
             CheckReconnectAllCandidates(directory,image);
             CheckCrossRootCopies(directory,image);
             CheckMixedFingerprints(directory,image);
@@ -944,6 +1014,76 @@ namespace MediaReviewer {
                         "Refused members must all be counted while the log keeps five lines and one summary per ZIP.");
                 }
                 Check(engine.Status.FailedFiles==10,"Refused ZIP members must make the scan report errors.");
+            }
+        }
+        // A reviewer's decision belongs to a file's content fingerprint inside its source folder. Closing the app and
+        // scanning the same folder again must therefore not bring back anything already marked Compliant,
+        // Non-compliant or Evidence, wherever in the folder tree it sits and however large it is.
+        static void CheckReviewedItemsStayReviewed(string directory,string image) {
+            string root=Path.Combine(directory,"reviewed-stays");
+            string top=Directory.CreateDirectory(Path.Combine(root,"example.user")).FullName;
+            string nested=Directory.CreateDirectory(Path.Combine(top,"album","2024","trip")).FullName;
+            byte[] picture=File.ReadAllBytes(image);
+            Func<int,byte[]> variant=extra=>{byte[] bytes=(byte[])picture.Clone();Array.Resize(ref bytes,picture.Length+extra);return bytes;};
+            // A valid 700 x 520 bitmap just over 1 MiB, so the default settings fingerprint it by sampling.
+            Func<byte,byte[]> bitmap=shade=>{
+                int row=2100,pixels=row*520;byte[] bytes=new byte[54+pixels];bytes[0]=0x42;bytes[1]=0x4D;
+                BitConverter.GetBytes(bytes.Length).CopyTo(bytes,2);BitConverter.GetBytes(54).CopyTo(bytes,10);BitConverter.GetBytes(40).CopyTo(bytes,14);
+                BitConverter.GetBytes(700).CopyTo(bytes,18);BitConverter.GetBytes(520).CopyTo(bytes,22);BitConverter.GetBytes((short)1).CopyTo(bytes,26);BitConverter.GetBytes((short)24).CopyTo(bytes,28);
+                BitConverter.GetBytes(pixels).CopyTo(bytes,34);for(int i=54;i<bytes.Length;i++)bytes[i]=(byte)(shade+i%7);return bytes;
+            };
+            File.WriteAllBytes(Path.Combine(nested,"good.png"),variant(11));File.WriteAllBytes(Path.Combine(nested,"flagged.png"),variant(12));
+            File.WriteAllBytes(Path.Combine(nested,"evidence.png"),variant(13));File.WriteAllBytes(Path.Combine(top,"large.bmp"),bitmap(40));
+            string database=Path.Combine(directory,"reviewed-stays.sqlite");
+            Func<ScanOptions> defaults=()=>new ScanOptions {RootPath=root,WorkerCount=2,Extensions=Formats.Quick,FingerprintPolicy=new FingerprintPolicy()};
+            Func<ReviewerEngine,string,long> id=(engine,name)=>{using(var reader=new SqliteConnection(database,true))return Convert.ToInt64(reader.Scalar("SELECT group_id FROM group_occurrences WHERE name=? AND superseded=0",name));};
+            Func<string,long[],ReviewRequest> decision=(status,groups)=>new ReviewRequest {OperationId=Guid.NewGuid().ToString("N"),Status=status,Reviewer="fixture",Notes="",GroupIds=groups};
+            using(var engine=ReviewerEngine.Open(database,true)){
+                Wait(()=>engine.Ready || engine.Faulted);Check(engine.Ready,engine.Status.Error);
+                engine.StartScan(defaults());Wait(()=>!engine.Status.RunningScan);
+                var rows=Result(engine,engine.RequestPage(new PageRequest {Generation=1})).Page.Rows;
+                Check(rows.Count==4 && rows.Single(r=>r.Name=="large.bmp").Algorithm=="sampled-sha256-v1" && rows.Single(r=>r.Name=="good.png").Algorithm=="sha256",
+                    "The fixture needs three fully hashed pictures in a nested folder and one sampled large picture.");
+                Result(engine,engine.RequestReview(decision("COMPLIANT",new[]{id(engine,"good.png"),id(engine,"large.bmp")})));
+                Result(engine,engine.RequestVaultUnlock(Encoding.UTF8.GetBytes(FixturePassword),true));
+                Result(engine,engine.RequestReview(decision("NON_COMPLIANT",new[]{id(engine,"flagged.png")})));
+                Result(engine,engine.RequestOriginalRetention(decision("EVIDENCE",new[]{id(engine,"evidence.png")})));
+                Result(engine,engine.RequestVaultLock());
+                Check(Result(engine,engine.RequestPage(new PageRequest {Generation=2})).Page.Total==0,"Every fixture item was reviewed, so nothing should be left to review.");
+            }
+            // The app has been closed. Open the catalog again and scan the same folder again.
+            using(var engine=ReviewerEngine.Open(database,false)){
+                Wait(()=>engine.Ready || engine.Faulted);Check(engine.Ready,engine.Status.Error);
+                engine.StartScan(defaults());Wait(()=>!engine.Status.RunningScan);
+                var page=Result(engine,engine.RequestPage(new PageRequest {Generation=1})).Page;
+                Check(String.IsNullOrEmpty(engine.Status.Error) && page.Total==0 && page.Totals.SequenceEqual(new long[]{0,2,1,1}),
+                    "Reopening the catalog and scanning the same folder brought reviewed items back: "+String.Join(",",page.Totals));
+                // A new picture is the only thing that should need a decision.
+                File.WriteAllBytes(Path.Combine(nested,"new.png"),variant(14));
+                // Copies of reviewed pictures under other names and folders are the same content, so they are already decided.
+                File.Copy(Path.Combine(nested,"good.png"),Path.Combine(top,"copy-of-good.png"));
+                File.Copy(Path.Combine(top,"large.bmp"),Path.Combine(nested,"copy-of-large.bmp"));
+                engine.StartScan(defaults());Wait(()=>!engine.Status.RunningScan);
+                page=Result(engine,engine.RequestPage(new PageRequest {Generation=2})).Page;
+                Check(String.IsNullOrEmpty(engine.Status.Error) && page.Rows.Select(r=>r.Name).SequenceEqual(new[]{"new.png"}) && page.Totals.SequenceEqual(new long[]{1,2,1,1}),
+                    "Only the new picture should need a decision; copies of reviewed pictures came back: "+String.Join("|",page.Rows.Select(r=>r.Name)));
+                // Changing a reviewed picture's content makes it a different picture.
+                File.WriteAllBytes(Path.Combine(nested,"good.png"),variant(15));
+                engine.StartScan(defaults());Wait(()=>!engine.Status.RunningScan);
+                page=Result(engine,engine.RequestPage(new PageRequest {Generation=3})).Page;
+                Check(String.IsNullOrEmpty(engine.Status.Error) && page.Rows.Select(r=>r.Name).OrderBy(n=>n).SequenceEqual(new[]{"good.png","new.png"}) && page.Totals.SequenceEqual(new long[]{2,2,1,1}),
+                    "A picture whose content changed must come back for review as a new item: "+String.Join("|",page.Rows.Select(r=>r.Name)));
+                // The same pictures in a different folder, scanned as its own source, are recognised as already reviewed.
+                string other=Path.Combine(directory,"reviewed-stays-elsewhere");
+                string otherFolder=Directory.CreateDirectory(Path.Combine(other,"example.user")).FullName;
+                File.Copy(Path.Combine(nested,"flagged.png"),Path.Combine(otherFolder,"flagged-elsewhere.png"));
+                File.Copy(Path.Combine(top,"copy-of-good.png"),Path.Combine(otherFolder,"good-elsewhere.png"));
+                File.Copy(Path.Combine(top,"large.bmp"),Path.Combine(otherFolder,"large-elsewhere.bmp"));
+                var elsewhere=defaults();elsewhere.RootPath=other;
+                engine.StartScan(elsewhere);Wait(()=>!engine.Status.RunningScan);
+                page=Result(engine,engine.RequestPage(new PageRequest {Generation=4})).Page;
+                Check(String.IsNullOrEmpty(engine.Status.Error) && page.Rows.Count==2 && page.Totals.SequenceEqual(new long[]{2,2,1,1}),
+                    "Copies of reviewed pictures in another scanned folder came back for review: "+String.Join("|",page.Rows.Select(r=>r.Name)));
             }
         }
         // Reconnect all must not bind a sampled-hash (quick candidate) match unless that was explicitly accepted.

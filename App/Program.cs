@@ -82,11 +82,26 @@ namespace MediaReviewer {
                 if(mode=="--self-test" && (args.Length==2 || args.Length==3))return Smoke.Run(args[1],args.Length==3 ? args[2] : null);
                 if(mode=="--verify-previews" && args.Length>=2)return Smoke.PreviewFiles(args.Skip(1));
                 if(mode=="--verify-import" && args.Length==3)return Smoke.Import(args[1],args[2]);
-                if(mode!=null && mode!="--window-smoke" && ((mode!="--database" && mode!="--open-evidence-package") || args.Length!=2))throw new ArgumentException("Use --database with a local SQLite path, --open-evidence-package with a package path, or launch without arguments.");
+                if(mode!=null && mode!="--window-smoke" && (mode!="--first-scan-smoke" || args.Length!=2) && ((mode!="--database" && mode!="--open-evidence-package") || args.Length!=2))throw new ArgumentException("Use --database with a local SQLite path, --open-evidence-package with a package path, or launch without arguments.");
                 var app=new Application();
-                using(var controller=new ReviewerWindow(ReadWindow(),mode!="--window-smoke")) {
-                    AttachUnhandledExceptionHandlers(app,mode!="--window-smoke",()=>controller.IsClosing);
-                    if(mode==null)controller.Window.Loaded+=(s,e)=>controller.Window.Dispatcher.BeginInvoke(new Action(()=>controller.ShowStartupCatalog()));
+                bool interactive=mode!="--window-smoke" && mode!="--first-scan-smoke";
+                // The window tests must never create or open the real default catalog in the user profile.
+                if(!interactive)ReviewerWindow.DefaultCatalogOverride=Path.Combine(mode=="--first-scan-smoke" ? args[1] : Path.GetDirectoryName(args[1]),"default-catalog","Media Review Catalog.sqlite");
+                using(var controller=new ReviewerWindow(ReadWindow(),interactive)) {
+                    AttachUnhandledExceptionHandlers(app,interactive,()=>controller.IsClosing);
+                    // No startup prompt: reopen the catalog an earlier scan created, or wait for the first scan to create it.
+                    if(mode==null)controller.Window.Loaded+=(s,e)=>controller.Window.Dispatcher.BeginInvoke(new Action(controller.OpenDefaultCatalogIfPresent));
+                    if(mode=="--first-scan-smoke") {
+                        bool passed=false;
+                        controller.Window.Width=1024;controller.Window.Height=768;
+                        controller.Window.Loaded+=(s,e)=>controller.Window.Dispatcher.BeginInvoke(new Action(()=>{
+                            try{Smoke.CheckFirstScanCreatesCatalog(controller,args[1]);passed=true;}
+                            catch(Exception error){Console.Error.WriteLine(error);}
+                            controller.Window.Close();
+                        }));
+                        app.Run(controller.Window);
+                        return passed ? 0 : 1;
+                    }
                     if(mode=="--database")controller.Open(args[1],false);
                     if(mode=="--open-evidence-package")controller.Window.Loaded+=(s,e)=>controller.Window.Dispatcher.BeginInvoke(new Action(()=>{
                         try{controller.OpenPackage(args[1]);}catch(Exception error){MessageBox.Show(controller.Window,error.Message,"Could not open Evidence package");}
@@ -96,7 +111,7 @@ namespace MediaReviewer {
                         if(args.Length!=2)throw new ArgumentException("Window smoke test needs a fixture database.");
                         controller.Window.Width=1024;controller.Window.Height=768;
                         controller.Window.Loaded+=(s,e)=>controller.Window.Dispatcher.BeginInvoke(new Action(()=>{
-                            try{controller.ShowStartupCatalog(Smoke.CheckStartupPrompt);Smoke.CheckCatalogPath(args[1]);controller.Open(args[1],false);}
+                            try{Smoke.CheckNoStartupPrompt(controller.Window);Smoke.CheckCatalogPath(args[1]);controller.Open(args[1],false);}
                             catch(Exception error){Console.Error.WriteLine(error);controller.Window.Close();}
                         }));
                         var timer=new DispatcherTimer {Interval=TimeSpan.FromMilliseconds(100)};
@@ -140,7 +155,7 @@ namespace MediaReviewer {
                     return app.Run(controller.Window);
                 }
             }catch(Exception error) {
-                if(headless || mode=="--self-test" || mode=="--window-smoke" || mode=="--preview-worker" || mode=="--draft-worker" || mode=="--playback-worker" || mode=="--verify-previews" || mode=="--verify-import")Console.Error.WriteLine(error);
+                if(headless || mode=="--self-test" || mode=="--window-smoke" || mode=="--first-scan-smoke" || mode=="--preview-worker" || mode=="--draft-worker" || mode=="--playback-worker" || mode=="--verify-previews" || mode=="--verify-import")Console.Error.WriteLine(error);
                 else MessageBox.Show(error.GetBaseException().Message,"Media Compliance Reviewer could not start",MessageBoxButton.OK,MessageBoxImage.Error);
                 return 1;
             }finally {

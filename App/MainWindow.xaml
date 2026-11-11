@@ -320,7 +320,7 @@
     <DockPanel x:Name="TopHeaderBar" Grid.Row="0" Margin="0,0,0,4">
       <Button x:Name="SettingsCogButton" DockPanel.Dock="Right" Content="⚙" Width="34" Height="34" Padding="0" FontSize="16" VerticalAlignment="Center" ToolTip="Settings, catalog, scan options, appearance, and tools"/>
       <StackPanel x:Name="CompactQueues" DockPanel.Dock="Left" Orientation="Horizontal" Margin="0,0,10,0"><TextBlock Text="Space" FontWeight="SemiBold" VerticalAlignment="Center" Margin="4"/><ComboBox x:Name="ViewBox" Width="195" SelectedIndex="0" AutomationProperties.Name="Review queue"><ComboBoxItem Content="To be reviewed (0)"/><ComboBoxItem Content="Compliant (0)"/><ComboBoxItem Content="Non-compliant (0)"/><ComboBoxItem Content="Evidence (0)"/><ComboBoxItem Content="AI suggestions (0)"/></ComboBox></StackPanel>
-      <TextBlock x:Name="DatabaseLabel" Text="☀ Welcome · click ⚙ in the top right to open or create a catalog" Foreground="{DynamicResource MutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="6,0,8,0" ToolTip="{Binding Text,RelativeSource={RelativeSource Self}}"/>
+      <TextBlock x:Name="DatabaseLabel" Text="☀ Welcome · choose a folder and press Start scan" Foreground="{DynamicResource MutedBrush}" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" Margin="6,0,8,0" ToolTip="{Binding Text,RelativeSource={RelativeSource Self}}"/>
     </DockPanel>
     <ScrollViewer x:Name="TopControls" Grid.Row="1" MaxHeight="340" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
     <StackPanel>
@@ -422,7 +422,20 @@
           <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightBrushKey}" Color="#9E522B"/>
           <SolidColorBrush x:Key="{x:Static SystemColors.InactiveSelectionHighlightTextBrushKey}" Color="#FFFDF9"/>
         </ListView.Resources>
-        <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/><Setter Property="Padding" Value="4,4"/><Setter Property="IsSelected" Value="{Binding IsSelected,Mode=TwoWay}"/><Setter Property="IsEnabled" Value="{Binding CanSelect}"/></Style></ListView.ItemContainerStyle>
+        <!-- The row template is drawn here because the Windows default paints a pale bar behind the selected row,
+             which makes this app's light text unreadable in the dark themes. -->
+        <ListView.ItemContainerStyle><Style TargetType="ListViewItem"><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/><Setter Property="Background" Value="Transparent"/><Setter Property="Padding" Value="4,4"/><Setter Property="IsSelected" Value="{Binding IsSelected,Mode=TwoWay}"/><Setter Property="IsEnabled" Value="{Binding CanSelect}"/>
+          <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListViewItem">
+            <Border x:Name="Row" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" SnapsToDevicePixels="True">
+              <GridViewRowPresenter Content="{TemplateBinding Content}" Columns="{TemplateBinding GridView.ColumnCollection}" VerticalAlignment="Center" SnapsToDevicePixels="{TemplateBinding SnapsToDevicePixels}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="Row" Property="Background" Value="{DynamicResource InsetBrush}"/></Trigger>
+              <Trigger Property="IsSelected" Value="True"><Setter TargetName="Row" Property="Background" Value="{DynamicResource PrimaryBrush}"/><Setter Property="Foreground" Value="{DynamicResource PrimaryTextBrush}"/></Trigger>
+              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.55"/></Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate></Setter.Value></Setter>
+        </Style></ListView.ItemContainerStyle>
         <ListView.View><GridView>
           <GridViewColumn Width="195" DisplayMemberBinding="{Binding Name}"><GridViewColumnHeader Content="Name" Tag="name"/></GridViewColumn>
           <GridViewColumn Width="115" DisplayMemberBinding="{Binding FolderLabel}"><GridViewColumnHeader Content="Folder" Tag="folder"/></GridViewColumn>
@@ -580,7 +593,7 @@
       <Border x:Name="EmptyPanel" Style="{StaticResource SurfacePanel}" Padding="28,24" VerticalAlignment="Top" MaxWidth="560" HorizontalAlignment="Center" Margin="0,28,0,0">
         <StackPanel>
           <TextBlock x:Name="EmptyTitle" Text="👋 Welcome to your review space" FontSize="20" FontWeight="SemiBold"/>
-          <TextBlock x:Name="EmptyText" Text="Open an existing catalog or start a fresh one on your computer using ⚙ in the top right corner. Your media folders can live on local drives, mapped drives, or shared network folders." Foreground="{DynamicResource MutedBrush}" FontSize="13.5" TextWrapping="Wrap" Margin="0,8,0,0"/>
+          <TextBlock x:Name="EmptyText" Text="Choose a folder and press Start scan. A catalog for your reviews is created automatically on this computer and reopened next time. To use a different catalog, click ⚙ in the top right corner. Your media folders can live on local drives, mapped drives, or shared network folders." Foreground="{DynamicResource MutedBrush}" FontSize="13.5" TextWrapping="Wrap" Margin="0,8,0,0"/>
         </StackPanel>
       </Border>
     </Grid>
