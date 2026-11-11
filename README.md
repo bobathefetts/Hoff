@@ -4,10 +4,10 @@ Media Compliance Reviewer for Windows is an offline C#/.NET desktop tool for fin
 
 ## Downloads
 
-- [Download for Windows (.exe)](https://github.com/Charlie22911/FleetHacker/releases/download/v0.3.23-preview/Media.Compliance.Reviewer.0.3.23-preview.exe)
-- [Download the offline browser preview (.html)](https://github.com/Charlie22911/FleetHacker/releases/download/v0.3.23-preview/Media.Compliance.Reviewer.0.3.23-preview.WebAssembly.html)
+- [Download for Windows (.exe)](https://github.com/bobathefetts/Hoff/releases/latest/download/Media.Compliance.Reviewer.exe)
+- [Download the offline browser preview (.html)](https://github.com/bobathefetts/Hoff/releases/latest/download/Media.Compliance.Reviewer.WebAssembly.html)
 
-The [release page](https://github.com/Charlie22911/FleetHacker/releases/tag/v0.3.23-preview) includes both source archives. See the [FleetHacker overview presentation](docs/FleetHacker-Overview.pptx) for the review workflow and an example of how verified matches reduce repeat work.
+These links always fetch the newest build of this fork (Hoff). The [release page](https://github.com/bobathefetts/Hoff/releases/latest) includes both source archives, and [CHANGELOG.md](CHANGELOG.md) lists what the fork has changed since the original [FleetHacker 0.3.23-preview](https://github.com/Charlie22911/FleetHacker/releases/tag/v0.3.23-preview). See the [FleetHacker overview presentation](docs/FleetHacker-Overview.pptx) for the review workflow and an example of how verified matches reduce repeat work.
 
 Made by IT1 Charlie McPherson, IT1 Joshua Maulden, and IT2 Alexander Harris. **Made at FleetHacker 2026**.
 
@@ -26,7 +26,7 @@ Open the downloaded HTML directly in desktop Chrome, Edge, or Firefox. It provid
 
 ## Open a catalog and scan
 
-1. At startup or in the sidebar, choose **Open or create catalog**. Select an existing SQLite catalog to open it, or enter a new filename on a local drive to create one. Choose **Later** to skip the startup prompt. When opening a final HTML database, choose a new local filename for the Windows copy.
+1. There is no startup prompt. The first time you press **Start scan**, the app creates a default catalog at `%LOCALAPPDATA%\Media Compliance Reviewer\Media Review Catalog.sqlite` and reopens it on later launches. To use a different catalog, choose **Open or create catalog** in the sidebar: select an existing SQLite catalog to open it, or enter a new filename on a local drive to create one. When opening a final HTML database, choose a new local filename for the Windows copy.
 2. Enter a local folder, mapped drive or UNC media share under **Source root**. In **Maintenance**, use **Use current source path as default** to save it in the database. You can temporarily enter a different path on another machine. Use **Reconnect all sources** to verify a replacement root for previously recorded locations.
 3. Start or resume a scan, then choose a review queue from the sidebar or compact **View** dropdown. New catalogs scan root-level media and check headers on ordinary files with unknown extensions by default. Change either setting or enable full SHA-256 under **Options**. Saved catalog preferences and resumed scan settings are preserved.
 4. Click a List column to sort the current queue or choose **Thumbnails** for an adjustable grid. Double-click an item to open **Inspect / video** without changing the gallery view. Choose **Quick Review** in the sidebar to review one item at a time. Swipe or drag left for the previous item, right for the next item, up for Compliant, or down for Non-compliant. The arrow keys do the same when the image is focused. A cue appears during a drag when the gesture is ready. Quick Review advances when the decision is saved. Press **C** or **N** outside an editor for the corresponding decision in any view.

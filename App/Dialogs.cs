@@ -44,20 +44,6 @@ namespace MediaReviewer {
         void TrackDatabaseWindow(Window dialog){databaseWindows.Add(dialog);dialog.Closed+=(s,e)=>databaseWindows.Remove(dialog);}
         void CloseDatabaseWindows(){foreach(Window dialog in databaseWindows.ToArray())dialog.Close();}
 
-        internal void ShowStartupCatalog(Action<Window> beforeShow=null) {
-            var panel=new StackPanel {Margin=new Thickness(24,22,24,20)};
-            var dialog=Dialog("Welcome to Media Review",panel,525,250);
-            dialog.Icon=Window.Icon;dialog.ShowInTaskbar=false;dialog.ResizeMode=ResizeMode.NoResize;
-            panel.Children.Add(new TextBlock {Text="☀ Welcome to Media Review",FontSize=21,FontWeight=FontWeights.SemiBold,Margin=new Thickness(0,0,0,8)});
-            panel.Children.Add(Label("Pick an existing catalog to jump right back in, or type a new filename on your computer to start a fresh one."));
-            var actions=Bar();panel.Children.Add(actions);
-            var open=ActionButton("📂 Open or create catalog…",()=>dialog.DialogResult=true);
-            open.Name="StartupCatalogButton";open.IsDefault=true;actions.Children.Add(open);
-            var later=ActionButton("Maybe later",dialog.Close);later.Name="StartupLaterButton";later.IsCancel=true;actions.Children.Add(later);
-            if(beforeShow!=null)beforeShow(dialog);
-            if(dialog.ShowDialog()==true)Guard(ChooseDatabase);
-        }
-
         void About() {
             var panel=new DockPanel {Margin=new Thickness(18)};var dialog=Dialog("About Media Compliance Reviewer",panel,720,560);
             var actions=Bar();actions.Children.Add(ActionButton("Close",dialog.Close));Dock(panel,actions,System.Windows.Controls.Dock.Bottom);

@@ -335,9 +335,21 @@ namespace MediaReviewer {
         }
 
         void ReviewWorkspaceItems(string target) {
-            if(display!=ReviewView.Quick){Review(target,Selected());return;}
-            var card=QuickCard();if(card==null || !card.CanSelect)return;
             long generation=view.Current;
+            if(display!=ReviewView.Quick){
+                var chosen=Selected();
+                if(chosen.Length==0)return;
+                // After the decision is saved, move the highlight on so the next one needs no extra click: to the item
+                // that slides into the reviewed item's place, or to the following item when the reviewed one stays listed.
+                int first=chosen.Min(c=>cards.IndexOf(c)),last=chosen.Max(c=>cards.IndexOf(c));
+                bool stays=target==BucketKeys[bucket];
+                Review(target,chosen,r=>{
+                    if(!r.Success || !view.Accept(generation) || display==ReviewView.Quick || cards.Any(c=>c.IsSelected))return;
+                    if(!stays)SelectCardAt(first);else if(last+1<cards.Count)SelectCardAt(last+1);
+                });
+                return;
+            }
+            var card=QuickCard();if(card==null || !card.CanSelect)return;
             Review(target,new[]{card},r=>{
                 if(!r.Success || !view.Accept(generation) || display!=ReviewView.Quick)return;
                 if(target==BucketKeys[bucket] && ReferenceEquals(QuickCard(),card))MoveQuick(1);
