@@ -5,6 +5,11 @@ using System.Linq;
 using System.Text;
 
 namespace MediaReviewer {
+    // Raised when an Undo step can never apply again because its item was edited afterwards. Review
+    // revisions only increase, so the caller drops the step instead of retrying it forever.
+    internal sealed class ReviewChangedException:InvalidOperationException {
+        internal ReviewChangedException(string message):base(message){}
+    }
     public static partial class Catalog {
         internal static bool HasExtendedReviewText(SqliteConnection db,long group) {
             return db.Scalar("SELECT 1 FROM imported_fields WHERE owner_table='review_groups' AND owner_rowid=? AND column_name IN('notes','reviewer') LIMIT 1",group)!=null;
@@ -32,7 +37,7 @@ namespace MediaReviewer {
                 foreach(var item in items) {
                     var rows=db.Query("SELECT status,legacy_key,review_revision FROM review_groups WHERE id=? AND retired=0",new object[]{item.GroupId},1);
                     if(rows.Count!=1 || (string)rows[0][0]=="EVIDENCE" || (long)rows[0][2]!=item.ExpectedRevision || HasExtendedReviewText(db,item.GroupId))
-                        throw new InvalidOperationException("A selected item has changed since that review. No decisions were undone.");
+                        throw new ReviewChangedException("A selected item has changed since that review. No decisions were undone.");
                     db.Execute("UPDATE review_groups SET status=?,reviewer=?,notes=?,reviewed_at=? WHERE id=?",
                         item.Status,item.Reviewer,item.Notes,now,item.GroupId);
                     db.Execute("INSERT INTO review_events VALUES(?,?,?,?,?,?,?,?,?)",Guid.NewGuid().ToString(),item.GroupId,
@@ -65,7 +70,8 @@ namespace MediaReviewer {
                 Body=db=>{RequireReportWritable();return Catalog.UndoReview(db,snapshot,operation);},
                 Done=value=>Respond(new UiResult {RequestId=id,Kind="UndoReview",OperationId=operation,
                     Success=true,Reconciled=value==null,ReviewRevisions=(Dictionary<long,long>)value}),
-                Failed=error=>Respond(new UiResult {RequestId=id,Kind="UndoReview",OperationId=operation,Error=error.Message})
+                Failed=error=>Respond(new UiResult {RequestId=id,Kind="UndoReview",OperationId=operation,Error=error.Message,
+                    ReviewChanged=error is ReviewChangedException})
             };
             if(!controls.TryAdd(work,cost))throw new InvalidOperationException("Review queue is busy. Undo remains available.");
             return id;

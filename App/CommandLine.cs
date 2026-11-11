@@ -20,6 +20,19 @@ namespace MediaReviewer {
         static void AttachIfNeeded() {
             var output=GetStdHandle(-11);var error=GetStdHandle(-12);
             if((output==IntPtr.Zero || output==new IntPtr(-1)) && (error==IntPtr.Zero || error==new IntPtr(-1)))AttachConsole(UInt32.MaxValue);
+            UseBomFreeConsoleInput();
+        }
+
+        // Process.Start writes the console input encoding's byte order mark into a redirected child stdin. In a
+        // UTF-8 console (code page 65001) that mark arrives ahead of the private worker handshake, so the preview,
+        // playback and AI workers all reject their parent. The same code page without a mark avoids it.
+        static void UseBomFreeConsoleInput() {
+            try {
+                var input=Console.InputEncoding;
+                if(input.CodePage==65001 && input.GetPreamble().Length>0)Console.InputEncoding=new System.Text.UTF8Encoding(false);
+            } catch(IOException) {
+            } catch(System.Security.SecurityException) {
+            }
         }
 
         internal static int Run(string[] args) {

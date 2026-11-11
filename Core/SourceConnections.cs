@@ -11,7 +11,7 @@ namespace MediaReviewer {
     public sealed class SourceRootPage {public List<SourceRoot> Rows=new List<SourceRoot>();public string Next="";public bool HasMore;internal long Cost {get{return 512+Next.Length*2L+Rows.Sum(x=>128L+2L*(x.Id.Length+x.Path.Length+x.RecordedPath.Length+x.ConnectionId.Length+(x.Name??"").Length));}}}
     public sealed class SourceCheckRow {public string Path {get;set;}public string State {get;set;}public string Error {get;set;}}
     public sealed class SourceConnection {
-        public string Id,RootId,Path,State;public long Total,Full,Candidates,Missing,Failed;
+        public string Id,RootId,Path,State;public long Total,Full,Candidates,Unaccepted,Missing,Failed;
         public List<SourceCheckRow> Rows=new List<SourceCheckRow>();
         internal long Cost {get{return 1024+2L*(Id.Length+RootId.Length+Path.Length+State.Length)+Rows.Sum(x=>128L+2L*(x.Path.Length+x.State.Length+x.Error.Length));}}
     }
@@ -20,9 +20,18 @@ namespace MediaReviewer {
         // The rowid range advances once through the recorded collection; do not sort it for each file.
         internal const string ConnectionNextSql="SELECT o.rowid,o.id,o.content_id,o.path,o.size,o.modified_ticks,o.file_identity FROM occurrences o NOT INDEXED JOIN source_connections s ON s.id=? WHERE o.root_id=s.root_id AND o.rowid>s.cursor AND o.rowid<=s.ceiling AND "+ConnectionEligible+" ORDER BY o.rowid LIMIT 1";
         internal const string ConnectionIdentitySql="SELECT c.algorithm,c.algorithm_version,c.digest,c.sampling,c.size FROM contents c WHERE c.id IN(SELECT connected.content_id FROM group_occurrences connected JOIN review_groups g ON g.id=connected.group_id WHERE connected.root_id=?1 AND connected.id=?3 AND g.status<>'EVIDENCE') AND ?2 IS NOT NULL LIMIT 2";
+        // True for a candidate row of a new check when the root's current connection, at the same location, already binds
+        // that same unchanged file (same observed size, time and file identity): either as an accepted candidate, or
+        // because a later scan of that location read the file and recorded it (source_observations).
+        internal const string CandidateAcceptedBefore="(EXISTS(SELECT 1 FROM source_connections fresh JOIN source_connections head ON head.id=fresh.base_head AND head.state='applied' AND head.path_key=fresh.path_key JOIN source_connection_files earlier ON earlier.connection_id=head.id AND earlier.occurrence_id=source_connection_files.occurrence_id WHERE fresh.id=source_connection_files.connection_id AND earlier.state='candidate' AND earlier.content_id=source_connection_files.content_id AND earlier.size IS source_connection_files.size AND earlier.modified_ticks IS source_connection_files.modified_ticks AND earlier.file_identity IS source_connection_files.file_identity) OR EXISTS(SELECT 1 FROM source_connections fresh JOIN source_connections head ON head.id=fresh.base_head AND head.state='applied' AND head.path_key=fresh.path_key JOIN source_observations seen ON seen.connection_id=head.id AND seen.occurrence_id=source_connection_files.occurrence_id WHERE fresh.id=source_connection_files.connection_id AND seen.size IS source_connection_files.size AND seen.modified_ticks IS source_connection_files.modified_ticks AND seen.file_identity IS source_connection_files.file_identity))";
         internal static SourceConnection ConnectionStatus(SqliteConnection db,string id,bool details=true){
             var data=db.Query("SELECT id,root_id,path,state,total,full_count,candidate_count,missing_count,failed_count FROM source_connections WHERE id=?",new object[]{id},1);if(data.Count==0)throw new InvalidOperationException("This source check is unavailable; refresh Sources.");var v=data[0];var result=new SourceConnection {Id=(string)v[0],RootId=(string)v[1],Path=(string)v[2],State=(string)v[3],Total=(long)v[4],Full=(long)v[5],Candidates=(long)v[6],Missing=(long)v[7],Failed=(long)v[8]};
-            if(details)foreach(var r in db.Query("SELECT substr(path,1,32767),state,error FROM source_connection_files WHERE connection_id=? ORDER BY rowid DESC LIMIT 20",new object[]{id},20))result.Rows.Add(new SourceCheckRow {Path=(string)r[0],State=(string)r[1],Error=(string)r[2]});return result;
+            if(details){
+                foreach(var r in db.Query("SELECT substr(path,1,32767),state,error FROM source_connection_files WHERE connection_id=? ORDER BY rowid DESC LIMIT 20",new object[]{id},20))result.Rows.Add(new SourceCheckRow {Path=(string)r[0],State=(string)r[1],Error=(string)r[2]});
+                // Candidates counts what the check found; Reconnect all may have left some of them unaccepted and unbound.
+                if(result.Candidates>0)result.Unaccepted=Convert.ToInt64(db.Scalar("SELECT COUNT(*) FROM source_connection_files WHERE connection_id=? AND state='unaccepted'",id));
+            }
+            return result;
         }
         internal static SourceRootPage SourceRoots(SqliteConnection db,string after){
             var result=new SourceRootPage();foreach(var row in db.Query("SELECT r.id,substr(s.path,1,32767),substr(r.path,1,32767),COALESCE((SELECT id FROM source_connections c WHERE c.root_id=r.id AND c.state IN('checking','interrupted','ready','discarding') ORDER BY created_at DESC LIMIT 1),h.connection_id,''),substr(r.label,1,1024) FROM roots r JOIN source_roots s ON s.id=r.id LEFT JOIN root_source_heads h ON h.root_id=r.id WHERE r.id>? COLLATE BINARY ORDER BY r.id COLLATE BINARY LIMIT 11",new object[]{after},11)){

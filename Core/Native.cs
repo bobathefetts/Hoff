@@ -124,6 +124,9 @@ namespace MediaReviewer {
             int rc=Sql.sqlite3_open_v2(Native.Text(Path.GetFullPath(path)),out Handle,readOnly ? 1 : 2|4,IntPtr.Zero);
             if(rc!=0) { string error=Handle==IntPtr.Zero ? "Cannot open database" : Native.Utf8(Sql.sqlite3_errmsg(Handle)); if(Handle!=IntPtr.Zero) Sql.sqlite3_close_v2(Handle); Handle=IntPtr.Zero; throw new DatabaseException(rc,error); }
             Sql.sqlite3_extended_result_codes(Handle,1); Sql.sqlite3_busy_timeout(Handle,3000);
+            // Catalogs travel between machines. With trusted_schema off, SQL stored in an opened file's views and
+            // triggers cannot call functions or virtual tables that SQLite does not mark as safe for an untrusted schema.
+            try { Script("PRAGMA trusted_schema=OFF;"); } catch { Sql.sqlite3_close_v2(Handle); Handle=IntPtr.Zero; throw; }
         }
         internal void CheckOwner() { if(Handle==IntPtr.Zero) throw new ObjectDisposedException("SQLite connection"); if(owner!=System.Threading.Thread.CurrentThread.ManagedThreadId) throw new InvalidOperationException("SQLite connection belongs to another worker"); }
         internal void Check(int rc) { if(rc!=0 && rc!=100 && rc!=101) throw new DatabaseException(rc,Native.Utf8(Sql.sqlite3_errmsg(Handle))); }

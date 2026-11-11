@@ -10,10 +10,13 @@ namespace MediaReviewer {
     }
     public sealed class ReconnectBatch {
         public string Id="",Path="",State="none",CreatedAt="";public bool ManifestComplete;
-        public long TotalRoots,CompletedRoots,ConnectedRoots,BlockedRoots,Full,Candidates,Missing,Failed;
+        // Candidates counts the quick matches that are bound (accepted now, or kept because the same unchanged file was already bound); Unaccepted counts those left unverified.
+        public long TotalRoots,CompletedRoots,ConnectedRoots,BlockedRoots,Full,Candidates,Unaccepted,Missing,Failed;
         public List<ReconnectRootResult> Rows=new List<ReconnectRootResult>();
         internal long Cost {get{return 512+2L*(Id.Length+Path.Length+State.Length+CreatedAt.Length)+Rows.Sum(r=>128L+2L*(r.RootId.Length+r.Label.Length+r.State.Length+r.Error.Length));}}
-        public string Summary {get{return "Reconnect all: "+Full+" full matches, "+Candidates+" quick candidates, "+Missing+" missing, "+Failed+" failed; "+ConnectedRoots+" / "+TotalRoots+" roots connected, "+BlockedRoots+" blocked. Quick matches remain candidates. Reviews and display order are preserved.";}}
+        public string Summary {get{return "Reconnect all: "+Full+" full matches, "+Candidates+" quick candidates bound, "+Missing+" missing, "+Failed+" failed; "+ConnectedRoots+" / "+TotalRoots+" roots connected, "+BlockedRoots+" blocked."+
+            (Unaccepted>0 ? " "+Unaccepted+" quick candidate matches were not accepted and stay unverified. To accept them, run Reconnect all again with quick candidates accepted, or rescan the new location." : "")+
+            " Bound quick matches remain candidates, not full-file proof. Reviews and display order are preserved.";}}
     }
     public static partial class Catalog {
         internal static ReconnectBatch ReconnectStatus(SqliteConnection db,string id,bool details=true){
@@ -22,16 +25,22 @@ namespace MediaReviewer {
             var b=new ReconnectBatch {Id=(string)r[0],Path=(string)r[1],State=(string)r[2],CreatedAt=(string)r[3],ManifestComplete=(long)r[4]!=0};
             var counts=db.Query("SELECT COUNT(*),COALESCE(SUM(state IN('connected','unmatched','blocked','discarded')),0),COALESCE(SUM(state='connected'),0),COALESCE(SUM(state='blocked'),0),COALESCE(SUM(CASE WHEN state='connected' THEN full_count ELSE 0 END),0),COALESCE(SUM(CASE WHEN state='connected' THEN candidate_count ELSE 0 END),0),COALESCE(SUM(missing_count),0),COALESCE(SUM(failed_count),0) FROM source_reconnect_items WHERE batch_id=?",new object[]{id},1)[0];
             b.TotalRoots=(long)counts[0];b.CompletedRoots=(long)counts[1];b.ConnectedRoots=(long)counts[2];b.BlockedRoots=(long)counts[3];b.Full=(long)counts[4];b.Candidates=(long)counts[5];b.Missing=(long)counts[6];b.Failed=(long)counts[7];
+            // A connected item records only the candidates it bound; its source check still holds how many were found.
+            // An unmatched item records the candidates that were found but not accepted.
+            b.Unaccepted=Convert.ToInt64(db.Scalar("SELECT COALESCE(SUM(CASE WHEN i.state='connected' THEN MAX(COALESCE(c.candidate_count,i.candidate_count)-i.candidate_count,0) WHEN i.state IN('cleaning_unmatched','unmatched') THEN i.candidate_count ELSE 0 END),0) FROM source_reconnect_items i LEFT JOIN source_connections c ON c.id=i.connection_id WHERE i.batch_id=?",id));
             if(details)foreach(var row in db.Query("SELECT i.root_id,substr(r.label,1,1024),i.state,i.full_count,i.candidate_count,i.missing_count,i.failed_count,substr(i.error,1,2048) FROM source_reconnect_items i JOIN roots r ON r.id=i.root_id WHERE i.batch_id=? ORDER BY CASE WHEN i.state IN('checking','cleaning_unmatched','cleaning_blocked') THEN 0 WHEN i.state='pending' THEN 2 ELSE 1 END,i.root_order DESC LIMIT 60",new object[]{id},60))b.Rows.Add(new ReconnectRootResult {RootId=(string)row[0],Label=(string)row[1],State=(string)row[2],Full=(long)row[3],Candidates=(long)row[4],Missing=(long)row[5],Failed=(long)row[6],Error=(string)row[7]});
             return b;
         }
     }
     public sealed partial class ReviewerEngine {
-        public string RequestReconnectAll(string rootPath){
+        // A quick candidate matches on sampled windows only, so it is not full-file proof. Reconnect all binds
+        // candidates only when the person starting or resuming the task accepts that explicitly, as the
+        // single-root path in SourceConnections requires. Otherwise it binds full matches and leaves the rest unverified.
+        public string RequestReconnectAll(string rootPath,bool acceptCandidates=false){
             string path=Path.GetDirectoryName(Catalog.PreviewSourcePath(rootPath,"source-check")),id=Guid.NewGuid().ToString("N");
-            return EnqueueOperationWithId("ReconnectAll",(db,t,p)=>OwnSourceConnection(()=>ReconnectAllCore(db,id,path,t,p)),4096+path.Length*2L,null,id);
+            return EnqueueOperationWithId("ReconnectAll",(db,t,p)=>OwnSourceConnection(()=>ReconnectAllCore(db,id,path,acceptCandidates,t,p)),4096+path.Length*2L,null,id);
         }
-        public string RequestResumeReconnectAll(string batchId){string id=ConnectionId(batchId);return EnqueueOperation("ReconnectAll",(db,t,p)=>OwnSourceConnection(()=>ReconnectAllCore(db,id,null,t,p)));}
+        public string RequestResumeReconnectAll(string batchId,bool acceptCandidates=false){string id=ConnectionId(batchId);return EnqueueOperation("ReconnectAll",(db,t,p)=>OwnSourceConnection(()=>ReconnectAllCore(db,id,null,acceptCandidates,t,p)));}
         public string RequestReconnectAllStatus(string batchId=null){string id=batchId==null ? null : ConnectionId(batchId);return QueueSourceRead("ReconnectAllStatus",db=>id!=null && db.Scalar("SELECT 1 FROM source_reconnect_batches WHERE id=?",id)==null ? new ReconnectBatch {Id=id,State="not_saved"} : Catalog.ReconnectStatus(db,id));}
         public string RequestDiscardReconnectAll(string batchId){string id=ConnectionId(batchId);return EnqueueOperation("ReconnectAllDiscard",(db,t,p)=>OwnSourceConnection(()=>DiscardReconnectAll(db,id,t,p)));}
         void TrimReconnectHistory(SqliteConnection db,CancellationToken token){
@@ -47,7 +56,7 @@ namespace MediaReviewer {
                 progress(Convert.ToInt64(db.Scalar("SELECT COUNT(*) FROM source_reconnect_items WHERE batch_id=?",id)),-1,"source roots recorded");
             }
         }
-        string ReconnectAllCore(SqliteConnection db,string id,string newPath,CancellationToken token,Action<long,long,string> progress){
+        string ReconnectAllCore(SqliteConnection db,string id,string newPath,bool acceptCandidates,CancellationToken token,Action<long,long,string> progress){
             token.ThrowIfCancellationRequested();if(newPath!=null){TrimReconnectHistory(db,token);WaitWrite(w=>{Catalog.PreviewTransaction(w,()=>{
                 if(w.Scalar("SELECT 1 FROM source_reconnect_batches WHERE state IN('running','interrupted','discarding') LIMIT 1")!=null)throw new InvalidOperationException("Resume or discard the unfinished Reconnect all task before starting another.");
                 w.Execute("INSERT INTO source_reconnect_batches(id,path,state,created_at,root_ceiling) VALUES(?,?,'running',?,(SELECT COALESCE(MAX(rowid),0) FROM roots))",id,newPath,Catalog.Now());
@@ -68,8 +77,19 @@ namespace MediaReviewer {
                         CheckConnection(db,connection,exists ? null : root,exists ? null : path,token,(done,total,unit)=>progress(done,total,"root "+ordinal+" / "+b.TotalRoots+": "+unit));token.ThrowIfCancellationRequested();
                         var checkedRoot=Catalog.ConnectionStatus(db,connection,false);
                         WaitWrite(w=>{Catalog.PreviewTransaction(w,()=>{
-                            if(checkedRoot.Full+checkedRoot.Candidates>0)ApplyConnection(w,connection,true,true);
-                            w.Execute("UPDATE source_reconnect_items SET state=?,full_count=?,candidate_count=?,missing_count=?,failed_count=? WHERE batch_id=? AND root_id=?",checkedRoot.Full+checkedRoot.Candidates>0 ? "connected" : "cleaning_unmatched",checkedRoot.Full,checkedRoot.Candidates,checkedRoot.Missing,checkedRoot.Failed,id,root);Catalog.Bump(w);
+                            // A check the person already applied in Sources carries its own explicit acceptance; never rewrite it.
+                            bool applied=(string)w.Scalar("SELECT state FROM source_connections WHERE id=?",connection)=="applied";
+                            // Without acceptance, a candidate stays bound only where the same unchanged file at the same location
+                            // was already bound (accepted before, or read by a later scan), so running Reconnect all again revokes nothing.
+                            long bound=applied || acceptCandidates ? checkedRoot.Candidates : Convert.ToInt64(w.Scalar("SELECT COUNT(*) FROM source_connection_files WHERE connection_id=?1 AND state='candidate' AND "+Catalog.CandidateAcceptedBefore,connection));
+                            bool connect=applied || checkedRoot.Full+bound>0;
+                            if(connect && !applied){
+                                // bound_occurrences binds 'full' and 'candidate' rows. An unaccepted candidate is renamed and
+                                // loses its observed file details, so it stays recorded but unverified like a file that failed the check.
+                                if(!acceptCandidates)w.Execute("UPDATE source_connection_files SET state='unaccepted',size=NULL,modified_ticks=NULL,file_identity=NULL WHERE connection_id=?1 AND state='candidate' AND NOT "+Catalog.CandidateAcceptedBefore,connection);
+                                ApplyConnection(w,connection,true,true);
+                            }
+                            w.Execute("UPDATE source_reconnect_items SET state=?,full_count=?,candidate_count=?,missing_count=?,failed_count=? WHERE batch_id=? AND root_id=?",connect ? "connected" : "cleaning_unmatched",checkedRoot.Full,connect ? bound : checkedRoot.Candidates,checkedRoot.Missing,checkedRoot.Failed,id,root);Catalog.Bump(w);
                         });return null;});
                     }catch(InvalidOperationException failure){
                         string error=failure.Message.Length>2048 ? failure.Message.Substring(0,2048) : failure.Message;

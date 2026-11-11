@@ -11,7 +11,7 @@ using System.Threading.Tasks;
 namespace MediaReviewer {
     public sealed class ArchiveMember {
         public string Name,Identity; public long Size,ModifiedTicks;public bool IsDirectory;
-        internal long Offset,Compressed,DirectoryOffset,ArchiveSize,ArchiveTicks;internal string ArchiveIdentity;internal uint Crc;internal ushort Method,Flags;
+        internal long Offset,Compressed,DirectoryOffset,ArchiveSize,ArchiveTicks;internal string ArchiveIdentity,Refusal;internal uint Crc;internal ushort Method,Flags;
         internal string Token {get{return String.Join("|",new[]{"ZIP1",ArchiveSize.ToString(CultureInfo.InvariantCulture),ArchiveTicks.ToString(CultureInfo.InvariantCulture),ArchiveIdentity,Offset.ToString(CultureInfo.InvariantCulture),Compressed.ToString(CultureInfo.InvariantCulture),Size.ToString(CultureInfo.InvariantCulture),Crc.ToString(CultureInfo.InvariantCulture),Method.ToString(CultureInfo.InvariantCulture),Flags.ToString(CultureInfo.InvariantCulture),ModifiedTicks.ToString(CultureInfo.InvariantCulture),DirectoryOffset.ToString(CultureInfo.InvariantCulture)});}}
     }
     // A ZIP source is a logical location, never a filesystem extraction destination.
@@ -30,7 +30,14 @@ namespace MediaReviewer {
         internal static bool Nested(string name){return new[]{".zip",".zipx",".7z",".rar",".tar",".gz",".bz2",".xz"}.Contains(Path.GetExtension(name).ToLowerInvariant());}
         static ushort U16(byte[] b,int at){return BitConverter.ToUInt16(b,at);}static uint U32(byte[] b,int at){return BitConverter.ToUInt32(b,at);}static long U64(byte[] b,int at){ulong n=BitConverter.ToUInt64(b,at);if(n>Int64.MaxValue)throw new InvalidDataException("ZIP64 value exceeds supported bounds");return (long)n;}
         static byte[] Read(FileStream file,int count,CancellationToken token){token.ThrowIfCancellationRequested();byte[] b=new byte[count];int at=0;while(at<count){token.ThrowIfCancellationRequested();int n=file.Read(b,at,count-at);if(n==0)throw new InvalidDataException("Truncated ZIP metadata");at+=n;}return b;}
-        internal static void Check(ArchiveMember m){if(m.Size<0 || m.Size>MemberLimit || m.Compressed<0 || (m.Size+99)/100>m.Compressed || (m.Method!=0 && m.Method!=8) || (m.Flags&~0x080E)!=0 || m.Offset<0 || m.DirectoryOffset<0 || m.DirectoryOffset>m.ArchiveSize || m.Offset>m.DirectoryOffset-30 || m.Compressed>m.DirectoryOffset-m.Offset-30 || (m.Method==0 && m.Size!=m.Compressed))throw new InvalidDataException("ZIP member exceeds size/ratio limits or uses encryption/unsupported compression");}
+        // Bounds that contradict the archive mean its directory cannot be trusted, so they fail the whole ZIP.
+        static void CheckBounds(ArchiveMember m){if(m.Size<0 || m.Compressed<0 || m.Offset<0 || m.DirectoryOffset<0 || m.DirectoryOffset>m.ArchiveSize || m.Offset>m.DirectoryOffset-30 || m.Compressed>m.DirectoryOffset-m.Offset-30)throw new InvalidDataException("ZIP member bounds are inconsistent with its archive");}
+        // Policy limits concern one member only. A refused member is never expanded; the other members stay readable.
+        internal static string RefusalFor(ArchiveMember m){
+            if(m.Size>MemberLimit || (m.Size+99)/100>m.Compressed || (m.Method!=0 && m.Method!=8) || (m.Flags&~0x080E)!=0 || (m.Method==0 && m.Size!=m.Compressed))return "ZIP member exceeds size/ratio limits or uses encryption/unsupported compression";
+            return !m.IsDirectory && Nested(m.Name) ? "Nested archives are excluded; scan an extracted media folder explicitly" : null;
+        }
+        internal static void Check(ArchiveMember m){CheckBounds(m);string refusal=RefusalFor(m);if(refusal!=null)throw new InvalidDataException(refusal);}
         internal sealed class Directory:IDisposable {
             internal readonly FileStream File;internal readonly FileStamp Stamp;readonly CancellationToken token;long offset,length,count;
             internal Directory(string path,string root,CancellationToken token){this.token=token;File=new FileStream(Paths.Io(path),FileMode.Open,FileAccess.Read,FileShare.Read,65536,FileOptions.Asynchronous|FileOptions.RandomAccess);try{if(root!=null)Paths.OpenedSourceWithinRoot(File,root);Stamp=FileAccessNative.Stamp(File);Header();Validate();}catch{File.Dispose();throw;}}
@@ -51,11 +58,11 @@ namespace MediaReviewer {
                     if(expanded==UInt32.MaxValue || compressed==UInt32.MaxValue || local==UInt32.MaxValue || disk==65535){bool found=false;for(int at=0;at+4<=extensions.Length;){int tag=U16(extensions,at),n=U16(extensions,at+2);at+=4;if(n>extensions.Length-at)throw new InvalidDataException("Truncated ZIP extra field");if(tag==1){int next=at;Func<long> take=()=>{if(next>at+n-8)throw new InvalidDataException("Truncated ZIP64 entry");long value=U64(extensions,next);next+=8;return value;};if(expanded==UInt32.MaxValue)expanded=take();if(compressed==UInt32.MaxValue)compressed=take();if(local==UInt32.MaxValue)local=take();if(disk==65535){if(next>at+n-4)throw new InvalidDataException("Truncated ZIP64 disk");disk=U32(extensions,next);}found=true;break;}at+=n;}if(!found)throw new InvalidDataException("ZIP64 entry metadata is missing");}
                     if(disk!=0 || ((U32(h,38)>>16)&0xF000)==0xA000)throw new InvalidDataException("ZIP disk links and symbolic links are unsupported");
                     long ticks=Stamp.ModifiedTicks;try{int date=U16(h,14),time=U16(h,12);ticks=new DateTime(1980+(date>>9),(date>>5)&15,date&31,time>>11,(time>>5)&63,(time&31)*2,DateTimeKind.Local).ToUniversalTime().Ticks;}catch(ArgumentOutOfRangeException){}
-                    var member=new ArchiveMember {Name=name,Size=expanded,Compressed=compressed,Offset=local,Crc=U32(h,16),Method=method,Flags=flags,ModifiedTicks=ticks,DirectoryOffset=offset,ArchiveSize=Stamp.Size,ArchiveTicks=Stamp.ModifiedTicks,ArchiveIdentity=Stamp.Identity};Check(member);if(Nested(name))throw new InvalidDataException("Nested archives are excluded; scan an extracted media folder explicitly");
-                    member.IsDirectory=decoded.EndsWith("/",StringComparison.Ordinal) || decoded.EndsWith("\\",StringComparison.Ordinal);member.Identity=member.Token;yield return member;
+                    var member=new ArchiveMember {Name=name,Size=expanded,Compressed=compressed,Offset=local,Crc=U32(h,16),Method=method,Flags=flags,ModifiedTicks=ticks,DirectoryOffset=offset,ArchiveSize=Stamp.Size,ArchiveTicks=Stamp.ModifiedTicks,ArchiveIdentity=Stamp.Identity};CheckBounds(member);
+                    member.IsDirectory=decoded.EndsWith("/",StringComparison.Ordinal) || decoded.EndsWith("\\",StringComparison.Ordinal);member.Refusal=RefusalFor(member);member.Identity=member.Token;yield return member;
                 }if(File.Position!=end)throw new InvalidDataException("ZIP central-directory count/length mismatch");
             }
-            void Validate(){var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);long total=0,nameBytes=0;foreach(var m in Members()){if(!names.Add(m.Name))throw new InvalidDataException("Ambiguous duplicate ZIP entry paths");total=checked(total+m.Size);nameBytes+=m.Name.Length*2L;if(total>TotalLimit || nameBytes>8L*1024*1024)throw new InvalidDataException("ZIP exceeds total expansion or retained-name limits");}Verify();}
+            void Validate(){var names=new HashSet<string>(StringComparer.OrdinalIgnoreCase);long total=0,nameBytes=0;foreach(var m in Members()){if(!names.Add(m.Name))throw new InvalidDataException("Ambiguous duplicate ZIP entry paths");if(m.Refusal==null)total=checked(total+m.Size);nameBytes+=m.Name.Length*2L;if(total>TotalLimit || nameBytes>8L*1024*1024)throw new InvalidDataException("ZIP exceeds total expansion or retained-name limits");}Verify();}
             internal void Verify(){if(!Stamp.Same(FileAccessNative.Stamp(File)))throw new FileChangedException("ZIP archive changed during discovery; start a fresh scan");}
             public void Dispose(){File.Dispose();}
         }
@@ -64,7 +71,7 @@ namespace MediaReviewer {
             try{string[] p=identity.Split('|');if(p.Length!=12 || p[0]!="ZIP1" || identity.Length>1024)throw new FormatException();var m=new ArchiveMember {Name=Normalize(name),ArchiveSize=Int64.Parse(p[1],CultureInfo.InvariantCulture),ArchiveTicks=Int64.Parse(p[2],CultureInfo.InvariantCulture),ArchiveIdentity=p[3],Offset=Int64.Parse(p[4],CultureInfo.InvariantCulture),Compressed=Int64.Parse(p[5],CultureInfo.InvariantCulture),Size=Int64.Parse(p[6],CultureInfo.InvariantCulture),Crc=UInt32.Parse(p[7],CultureInfo.InvariantCulture),Method=UInt16.Parse(p[8],CultureInfo.InvariantCulture),Flags=UInt16.Parse(p[9],CultureInfo.InvariantCulture),ModifiedTicks=Int64.Parse(p[10],CultureInfo.InvariantCulture),DirectoryOffset=Int64.Parse(p[11],CultureInfo.InvariantCulture)};Check(m);if(m.Token!=identity)throw new FormatException();return m;}catch(Exception e){if(e is FormatException || e is OverflowException || e is NullReferenceException)throw new InvalidDataException("Invalid saved ZIP member identity",e);throw;}
         }
         internal static SourceRead Open(string path,string identity,CancellationToken token,string root){
-            string[] parts=Split(path);ArchiveMember m;if(identity==null){using(var directory=new Directory(parts[0],root,token)){m=directory.Members().FirstOrDefault(x=>x.Name==parts[1]);if(m==null)throw new FileNotFoundException("ZIP member is unavailable",path);}}else m=Parse(identity,parts[1]);
+            string[] parts=Split(path);ArchiveMember m;if(identity==null){using(var directory=new Directory(parts[0],root,token)){m=directory.Members().FirstOrDefault(x=>x.Name==parts[1]);if(m==null)throw new FileNotFoundException("ZIP member is unavailable",path);if(m.Refusal!=null)throw new InvalidDataException(m.Refusal);}}else m=Parse(identity,parts[1]);
             expansion.Wait(token);FileStream file=null;try{
                 file=new FileStream(Paths.Io(parts[0]),FileMode.Open,FileAccess.Read,FileShare.Read,65536,FileOptions.Asynchronous|FileOptions.SequentialScan);if(root!=null)Paths.OpenedSourceWithinRoot(file,root);var before=FileAccessNative.Stamp(file);if(before.Size!=m.ArchiveSize || before.ModifiedTicks!=m.ArchiveTicks || before.Identity!=m.ArchiveIdentity)throw new InvalidDataException("ZIP archive changed since discovery; start a fresh scan before using this member");
                 file.Position=m.Offset;byte[] h=Read(file,30,token);if(U32(h,0)!=0x04034b50 || U16(h,6)!=m.Flags || U16(h,8)!=m.Method)throw new InvalidDataException("ZIP local header differs from its directory");int nameBytes=U16(h,26),extra=U16(h,28);if(nameBytes==0 || nameBytes>4096 || file.Position+nameBytes+extra>m.DirectoryOffset-m.Compressed)throw new InvalidDataException("ZIP local data bounds are invalid");byte[] name=Read(file,nameBytes,token);string localName=((m.Flags&2048)!=0 ? (Encoding)utf8 : Encoding.GetEncoding(437)).GetString(name);if(Normalize(localName)!=m.Name)throw new InvalidDataException("ZIP local entry name differs from its directory");
@@ -72,15 +79,27 @@ namespace MediaReviewer {
                 var checkedStream=new MemberStream(file,m,token,()=>expansion.Release());file=null;return new SourceRead(checkedStream,new FileStamp {Size=m.Size,ModifiedTicks=m.ModifiedTicks,Identity=m.Token},checkedStream.Complete);
             }catch{try{if(file!=null)file.Dispose();}finally{expansion.Release();}throw;}
         }
-        internal static FileRecord Fingerprint(string path,FileRecord record,byte[] buffer,CancellationToken token,Action<int> progress,long cutoff,string root,string identity=null){
-            using(var source=Open(path,identity,token,root)){if(cutoff>0 && source.Stamp.ModifiedTicks<cutoff)return null;using(var sha=SHA256.Create()){long done=0;int n;while((n=source.Stream.Read(buffer,0,buffer.Length))>0){token.ThrowIfCancellationRequested();sha.TransformBlock(buffer,0,n,buffer,0);done+=n;if(progress!=null)progress(n);}source.Validate();sha.TransformFinalBlock(new byte[0],0,0);record.Size=source.Stamp.Size;record.ModifiedTicks=source.Stamp.ModifiedTicks;record.FileIdentity=source.Stamp.Identity;record.BytesRead=done;record.Hash=EvidenceFormat.Hex(sha.Hash);record.Algorithm="sha256";record.AlgorithmVersion=1;record.Sampling="";return record;}}
+        // sniffExtensions mirrors FileAccessNative.FingerprintScoped: a member whose extension is not a known media
+        // type is recognised from its first bytes, so renaming a picture inside a ZIP does not hide it from a scan.
+        internal static FileRecord Fingerprint(string path,FileRecord record,byte[] buffer,CancellationToken token,Action<int> progress,long cutoff,string root,string identity=null,string[] sniffExtensions=null){
+            using(var source=Open(path,identity,token,root)){if(cutoff>0 && source.Stamp.ModifiedTicks<cutoff)return null;using(var sha=SHA256.Create()){long done=0;int n;
+                if(sniffExtensions!=null){
+                    var header=new byte[(int)Math.Min(source.Stamp.Size,512)];int read=0;
+                    while(read<header.Length){n=source.Stream.Read(header,read,header.Length-read);if(n==0)throw new InvalidDataException("ZIP member ended during header detection");read+=n;}
+                    string type=ImageHeader.Sniff(header);if(type==null || !Formats.IncludesDetected(type,sniffExtensions))return null;
+                    record.Extension=type;sha.TransformBlock(header,0,read,header,0);done=read;if(progress!=null && read>0)progress(read);
+                }
+                while((n=source.Stream.Read(buffer,0,buffer.Length))>0){token.ThrowIfCancellationRequested();sha.TransformBlock(buffer,0,n,buffer,0);done+=n;if(progress!=null)progress(n);}source.Validate();sha.TransformFinalBlock(new byte[0],0,0);record.Size=source.Stamp.Size;record.ModifiedTicks=source.Stamp.ModifiedTicks;record.FileIdentity=source.Stamp.Identity;record.BytesRead=done;record.Hash=EvidenceFormat.Hex(sha.Hash);record.Algorithm="sha256";record.AlgorithmVersion=1;record.Sampling="";return record;}}
         }
         internal static PreviewResult Preview(string path,long size,long ticks,string identity,int side,int limit,CancellationToken token,string root){
             return WithPreviewFile(path,size,ticks,identity,token,root,
                 (file,stamp)=>MediaReviewer.Preview.CreateExpectedScoped(file,stamp.Size,stamp.ModifiedTicks,stamp.Identity,side,limit,token,Native.RuntimeDirectory));
         }
         internal static T WithPreviewFile<T>(string path,long size,long ticks,string identity,CancellationToken token,string root,Func<string,FileStamp,T> decode){
-            string file=MediaScratch.NewArchivePath(Path.GetExtension(Split(path)[1]));string own=null;
+            // Only a known media extension is carried to the private copy. A renamed member gets none, so the decoder
+            // identifies it from its header and no file with an arbitrary extension is ever written to disk.
+            string extension=Path.GetExtension(Split(path)[1]);
+            string file=MediaScratch.NewArchivePath(Formats.Supported(extension.TrimStart('.').ToLowerInvariant()) ? extension : "");string own=null;
             try{using(var source=SourceRead.Open(path,size,ticks,identity,token,root)){
                 if(new DriveInfo(Path.GetPathRoot(file)).AvailableFreeSpace<source.Stamp.Size+64L*1024*1024)throw new IOException("Insufficient private temporary space for this ZIP preview");
                 using(var output=new FileStream(Paths.Io(file),FileMode.CreateNew,FileAccess.ReadWrite,FileShare.Read,65536)){own=FileAccessNative.Stamp(output).Identity;byte[] b=new byte[1024*1024];int n;while((n=source.Stream.Read(b,0,b.Length))>0){token.ThrowIfCancellationRequested();output.Write(b,0,n);}source.Validate();output.Flush();}

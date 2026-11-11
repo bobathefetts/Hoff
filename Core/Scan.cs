@@ -32,7 +32,7 @@ namespace MediaReviewer {
         }
     }
     internal sealed class ScanJob { internal long Id; internal int User; internal string Path,Kind,Signature,Occurrence;internal bool RequiresFull; }
-    internal sealed class DiscoveryRow { internal string Path,Kind,State,Signature; internal long Cost { get { return Path.Length*2+2048; } } }
+    internal sealed class DiscoveryRow { internal string Path,Kind,State,Signature,Error; internal long Cost { get { return Path.Length*2+2048; } } }
     internal sealed partial class ScanRunner {
         readonly ReviewerEngine engine; readonly string id; readonly bool resume; readonly int resumeWorkers;
         readonly Thread coordinator; readonly CancellationTokenSource cancellation=new CancellationTokenSource();
@@ -214,7 +214,7 @@ namespace MediaReviewer {
         }
         void FlushDiscovery(List<DiscoveryRow> rows,int ordinal) {
             var batch=new List<DiscoveryRow>(rows); rows.Clear();
-            Write(db=> { db.Execute("BEGIN IMMEDIATE"); try { foreach(DiscoveryRow row in batch) db.Execute("INSERT OR IGNORE INTO jobs(scan_id,user_ordinal,kind,path,path_key,state,signature) VALUES(?,?,?,?,?,?,?)",id,ordinal,row.Kind,row.Path,Paths.Key(row.Path),row.State,row.Signature); db.Execute("COMMIT"); } catch { Catalog.Rollback(db); throw; } return null; },batch.Sum(x=>x.Cost));
+            Write(db=> { db.Execute("BEGIN IMMEDIATE"); try { foreach(DiscoveryRow row in batch) db.Execute("INSERT OR IGNORE INTO jobs(scan_id,user_ordinal,kind,path,path_key,state,signature,error) VALUES(?,?,?,?,?,?,?,?)",id,ordinal,row.Kind,row.Path,Paths.Key(row.Path),row.State,row.Signature,row.Error); db.Execute("COMMIT"); } catch { Catalog.Rollback(db); throw; } return null; },batch.Sum(x=>x.Cost));
             engine.Update(s=>s.LastProgressUtc=DateTime.UtcNow);
         }
         void Backpressure(int ordinal) {
@@ -224,14 +224,30 @@ namespace MediaReviewer {
         }
         void DiscoverArchive(ScanJob job){
             engine.Update(s=>s.Stage="Validating ZIP directory: "+job.Path);
-            try{Retry(()=>{using(var directory=new Archives.Directory(Full(job.Path),options.RootPath,cancellation.Token)){
+            // A refused member is recorded as a failed file here instead of being queued for work that can only fail.
+            // Every one counts as a failed file, but only the first few are written to the 500-row log, so a single
+            // protected ZIP cannot push the scan's other errors out of it.
+            var refusedPaths=new List<string>();var refusedReasons=new List<string>();long refused=0;
+            try{Retry(()=>{refusedPaths.Clear();refusedReasons.Clear();refused=0;using(var directory=new Archives.Directory(Full(job.Path),options.RootPath,cancellation.Token)){
                 engine.Update(s=>s.Stage="Discovering ZIP members: "+job.Path);
                 Write(db=>{var stamp=directory.Stamp;var saved=db.Query("SELECT archive_size,archive_ticks,archive_identity FROM archive_manifests WHERE scan_id=? AND path_key=?",new object[]{id,Paths.Key(job.Path)},1);if(saved.Count>0 && ((long)saved[0][0]!=stamp.Size || (long)saved[0][1]!=stamp.ModifiedTicks || (string)saved[0][2]!=stamp.Identity))throw new InvalidDataException("ZIP archive changed after saved discovery; start a fresh scan");db.Execute("INSERT OR IGNORE INTO archive_manifests VALUES(?,?,?,?,?,?)",id,Paths.Key(job.Path),job.Path,stamp.Size,stamp.ModifiedTicks,stamp.Identity);return null;});
                 var batch=new List<DiscoveryRow>();long cost=0;foreach(var member in directory.Members()){
-                    cancellation.Token.ThrowIfCancellationRequested();if(member.IsDirectory)continue;string ext=Path.GetExtension(member.Name).TrimStart('.').ToLowerInvariant();if(!options.Extensions.Contains(ext) || (options.CutoffUtcTicks>0 && member.ModifiedTicks<options.CutoffUtcTicks) || (options.ExcludeApplicationData && member.Name.Split('\\').Any(x=>x.Equals("AppData",StringComparison.OrdinalIgnoreCase) || x.Equals("Application Data",StringComparison.OrdinalIgnoreCase))))continue;
-                    var row=new DiscoveryRow {Path=job.Path+Archives.Separator+member.Name,Kind="file",State="pending",Signature=member.Identity};batch.Add(row);cost+=row.Cost;if(batch.Count>=32 || cost>=1024*1024){FlushDiscovery(batch,job.User);cost=0;Backpressure(job.User);}
+                    cancellation.Token.ThrowIfCancellationRequested();if(member.IsDirectory)continue;string ext=Path.GetExtension(member.Name).TrimStart('.').ToLowerInvariant();
+                    // Like loose files, an unknown extension is listed so its first bytes can be checked for renamed media.
+                    // A nested archive is listed too, so it is reported as unscanned content instead of being hidden.
+                    bool wanted=options.Extensions.Contains(ext) || Archives.Nested(member.Name) || (options.SniffRenamed && !Formats.Supported(ext));
+                    if(!wanted || (options.CutoffUtcTicks>0 && member.ModifiedTicks<options.CutoffUtcTicks) || (options.ExcludeApplicationData && member.Name.Split('\\').Any(x=>x.Equals("AppData",StringComparison.OrdinalIgnoreCase) || x.Equals("Application Data",StringComparison.OrdinalIgnoreCase))))continue;
+                    var row=new DiscoveryRow {Path=job.Path+Archives.Separator+member.Name,Kind="file",State=member.Refusal==null ? "pending" : "failed",Signature=member.Identity,Error=member.Refusal};
+                    if(member.Refusal!=null){refused++;if(refusedPaths.Count<5){refusedPaths.Add(row.Path);refusedReasons.Add(member.Refusal);}}
+                    batch.Add(row);cost+=row.Cost;if(batch.Count>=32 || cost>=1024*1024){FlushDiscovery(batch,job.User);cost=0;Backpressure(job.User);}
                 }if(batch.Count>0)FlushDiscovery(batch,job.User);directory.Verify();
-            }},"Discovering ZIP",Full(job.Path),job);Finish(job,"complete",null);engine.Update(s=>s.Stage="Fingerprinting and previewing "+job.Path);}catch(OperationCanceledException){throw;}catch(Exception error){Finish(job,"failed",error);}
+            }},"Discovering ZIP",Full(job.Path),job);
+            if(refused>0)Write(db=>{
+                for(int i=0;i<refusedPaths.Count;i++)Catalog.Log(db,"error","file",Full(refusedPaths[i]),refusedReasons[i]);
+                if(refused>refusedPaths.Count)Catalog.Log(db,"error","archive",Full(job.Path),(refused-refusedPaths.Count)+" more members of this ZIP were refused and not examined. Each is counted as a failed file.");
+                return null;
+            });
+            Finish(job,"complete",null);engine.Update(s=>s.Stage="Fingerprinting and previewing "+job.Path);}catch(OperationCanceledException){throw;}catch(Exception error){Finish(job,"failed",error);}
         }
         void Finish(ScanJob job,string state,Exception error) {
             string description=error==null ? null : FileAccessNative.Describe(error);
@@ -257,7 +273,7 @@ namespace MediaReviewer {
                             var item=new FileRecord {RootId=rootId,ScanId=id,JobId=job.Id,UserOrdinal=job.User,RelativePath=job.Path,Name=name,Extension=Path.GetExtension(name).TrimStart('.').ToLowerInvariant()};
                             Action<int> progress=bytes=>engine.Update(s=>{s.BytesRead+=bytes;s.LastProgressUtc=DateTime.UtcNow;});
                             var sniff=options.SniffRenamed && !Formats.Supported(item.Extension) ? options.Extensions : null;
-                            record=archive ? Archives.Fingerprint(Full(job.Path),item,buffer,cancellation.Token,progress,options.CutoffUtcTicks,options.RootPath,job.Signature)
+                            record=archive ? Archives.Fingerprint(Full(job.Path),item,buffer,cancellation.Token,progress,options.CutoffUtcTicks,options.RootPath,job.Signature,sniff)
                                 : FileAccessNative.FingerprintScoped(Full(job.Path),item,buffer,cancellation.Token,progress,options.CutoffUtcTicks,job.RequiresFull ? MediaReviewer.FingerprintPolicy.Full() : options.FingerprintPolicy,options.RootPath,sniff);
                             if(record!=null)record=MatchCatalogIdentity(record,buffer);
                         },"Fingerprinting",Full(job.Path),job);

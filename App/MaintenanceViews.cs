@@ -39,7 +39,8 @@ namespace MediaReviewer {
                     if(!live || !loadVersion.Accept(version))return;
                     if(!r.Success){feedback.Text=r.Error;refreshButtons();return;}
                     current=r.SourceConnection;results.ItemsSource=current.Rows;
-                    counts.Text=String.Format("{0} · {1:N0} full matches · {2:N0} candidates · {3:N0} missing · {4:N0} failed\n{5}",current.State,current.Full,current.Candidates,current.Missing,current.Failed,current.Path);
+                    counts.Text=String.Format("{0} · {1:N0} full matches · {2:N0} candidates{6} · {3:N0} missing · {4:N0} failed\n{5}",current.State,current.Full,current.Candidates,current.Missing,current.Failed,current.Path,
+                        current.Unaccepted>0 ? String.Format(" ({0:N0} not accepted)",current.Unaccepted) : "");
                     refreshButtons();
                 });
             };

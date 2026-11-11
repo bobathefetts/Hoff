@@ -111,7 +111,7 @@ namespace MediaReviewer {
             Click("ListModeButton",()=>SetView(ReviewView.List));
             Click("ThumbnailsModeButton",()=>SetView(ReviewView.Thumbnails));
             Click("QuickModeButton",()=>OpenQuick(FocusedCard()));
-            Click("RefreshViewButton",()=>{view.Advance();refresh=true;foreach(var card in cards)card.ImageQueued=false;});
+            Click("RefreshViewButton",InvalidateView);
             Click("QueueSidebarButton",()=>{workspace.SidebarCollapsed=!workspace.SidebarCollapsed;UpdateWorkspace();});
             Click("TopControlsButton",()=>{workspace.TopCollapsed=!workspace.TopCollapsed;UpdateWorkspace();});
             Click("PreviewPaneButton",()=>{workspace.PreviewCollapsed=!workspace.PreviewCollapsed;UpdateWorkspace();});
@@ -236,6 +236,9 @@ namespace MediaReviewer {
             if(quickZoom<=1.02){quickZoom=1.0;quickPanX=quickPanY=0;}
             ApplyQuickTransform();
         }
+        // Advancing the view generation drops in-flight thumbnail results, so every card must be allowed to
+        // request its image again or it stays on "Loading preview" until the next page load.
+        void InvalidateView(){view.Advance();refresh=true;foreach(var card in cards)card.ImageQueued=false;}
         void RotateQuick(int deltaDegrees){
             if(display!=ReviewView.Quick || QuickCard()==null)return;
             quickRotation=((quickRotation+deltaDegrees)%360+360)%360;
@@ -366,7 +369,7 @@ namespace MediaReviewer {
                 e.Handled=true;if(!e.IsRepeat)Guard(()=>RunQuickAction(direction));return;
             }
             if(display==ReviewView.Quick && e.Key==Key.R && !e.IsRepeat){
-                e.Handled=true;Guard(()=>RotateQuick(90));return;
+                e.Handled=true;var quickFocus=FocusedCard();if(quickFocus!=null && !Formats.IsPlayable(quickFocus.Record.Extension))Guard(()=>RotateQuick(90));return;
             }
             if(e.IsRepeat || (e.Key!=Key.C && e.Key!=Key.N))return;
             if(display!=ReviewView.Quick && Selected().Length==0)return;

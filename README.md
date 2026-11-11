@@ -38,13 +38,13 @@ FLV and WebM scan as videos and get saved posters. Animated GIFs stay in the ima
 
 Playback preparation runs separately from exports and other long catalog tasks. Inspect also has its own decoder so it can load images while scan previews are being created. Inspect shows both source and preview dimensions when they differ. Wide or tall previews can use up to 8,192 pixels on the longest edge within the decoded pixel and encoded size limits.
 
-ZIP previews and playback copies use a private temporary directory. The app checks for abandoned copies in the background when it starts. An open instance or media helper keeps its directory leased until it has finished using it.
+When ZIP scanning is on, each archive member is checked on its own. A member that is encrypted, compresses more than 100:1, exceeds 512 MiB, or is itself an archive is listed as a failed file with the reason, and the other members are still catalogued. Renamed media inside a ZIP is detected from its header when header checks are on. ZIP previews and playback copies use a private temporary directory. The app checks for abandoned copies in the background when it starts. An open instance or media helper keeps its directory leased until it has finished using it.
 
 **Details / notes** lists each recorded path with its source root and refreshes the list after a scan. An **Exact match** row shows the same full SHA-256 on another review card. A **Candidate** row shows the same sampled fingerprint on another card and still needs full verification. A Quick scan can verify a new copy against a full fingerprint already in the catalog.
 
 In Inspect, press **Left** or **Right** to browse items on the current page, **Up** for Compliant, or **Down** for Non-compliant. Inspect advances to the next item on the page after a successful decision. Text fields and video controls keep their own keyboard behavior. Choose **Full screen** or press **F** or **F11** in Inspect or Quick Review. You can keep browsing and marking items in full screen. Press **Esc** to restore the window.
 
-Use **Undo** or **Ctrl+Z** to reverse a recent supported review from the current session. A batch is reversed together. If any selected item's saved review changed after that decision, the whole Undo is rejected and the newer edits are preserved.
+Use **Undo** or **Ctrl+Z** to reverse a recent supported review from the current session. A batch is reversed together. If any selected item's saved review changed after that decision (for example its notes were edited), the whole Undo is rejected, the newer edits are preserved, and that step is dropped so earlier reviews can still be undone.
 
 Quick Review keeps the same item in focus when a scan reorders the current page. If the item leaves the page, Quick Review displays the item at the previous position or the last item on the page. The gallery updates its cards and counts together and reuses saved previews that have not changed.
 
@@ -52,7 +52,7 @@ Open **Details / notes** on an Evidence item to unlock and read its authenticate
 
 The left sidebar holds the review queues, view modes, and catalog tools. Click the integrated border arrow at the middle of the sidebar’s right edge, the preview’s left edge, or the top controls’ bottom edge to collapse or reopen that section. The **View** dropdown remains available when the sidebar is closed. In List or Thumbnails, drag the thin preview divider immediately to the left of its arrow to resize the pane. You can also focus the divider with Tab and use the arrow keys. The app remembers the width when it closes.
 
-Use **Maintenance > Sources / reconnect** to check and apply a replacement folder for one root. **Reconnect all sources** handles bulk checks. **Preview tasks** shows the outcome for each item and lets you resume or discard unfinished work. **Export review report** offers CSV and offline HTML, with optional plaintext Evidence details after vault unlock. Select a Non-compliant item for its **Case sheet**, which keeps reviewer and Windows file owner distinct.
+Use **Maintenance > Sources / reconnect** to check and apply a replacement folder for one root. **Reconnect all sources** handles bulk checks. It binds files whose full SHA-256 matches. A quick candidate (a larger file that was matched on sampled parts instead of being read in full) is not full-file proof, so it is bound only when you tick **Also accept quick candidate matches**; otherwise it stays unverified until you rescan the new location or run Reconnect all again with that option. A candidate that is already bound for the same unchanged file at the same location stays bound when you repeat Reconnect all. **Preview tasks** shows the outcome for each item and lets you resume or discard unfinished work. **Export review report** offers CSV and offline HTML, with optional plaintext Evidence details after vault unlock. Select a Non-compliant item for its **Case sheet**, which keeps reviewer and Windows file owner distinct.
 
 If a reconnect points to a different folder, start a fresh scan there. **Resume** requires the original source for its saved manifest. When retrying a preview or retaining an original from a full SHA-256 card, the app can try another recorded copy if the preferred source is unavailable. Retention verifies the chosen copy's full SHA-256 before saving it.
 
@@ -88,7 +88,7 @@ For unattended scans, pass `--database PATH --scan-root ROOT` with any desired s
 
 Extract the source ZIP and open `MediaComplianceReviewer.csproj` to edit the project. The distributable is a native x64 host containing the managed output, so the managed build by itself is an intermediate file. The build uses Windows .NET Framework C# tooling and a developer WSL environment with Bash, OpenSSL, Python 3, curl, tar, make, Ninja, `glslc` and the pinned LLVM-MinGW toolchain. Set `MCR_GLSLC` if the shader compiler is outside the build host's `PATH`. The dependency recipes verify the archives before using them.
 
-Build the codecs once or after changing their configuration. Then link the application from Windows. The commands assume the Ubuntu-24.04 WSL distribution and the project as the current directory.
+Build the codecs once or after changing their configuration. Then link the application from Windows. The commands assume the Ubuntu-24.04 WSL distribution and the project as the current directory. For a distribution with another name, change `-d` in the four script commands and pass `-Distribution <name>` to `build.ps1`.
 
 ```powershell
 wsl.exe -d Ubuntu-24.04 -- bash native/build-codecs.sh
@@ -100,6 +100,8 @@ wsl.exe -d Ubuntu-24.04 -- bash native/build-gemma.sh
 ```
 
 The smoke test copies and renames the executable, checks the catalog and review lifecycle with generated media, opens the WPF gallery, and checks the application and redirected temp directories for extra files. Pass generated media via `-PreviewFixtures` to test additional formats. Pass `-PlaybackFixtures` with a directory containing a generated `legacy.flv` with audio and a short looping `animated.gif` to check offline playback. Include a generated `audio.webm` with Opus audio to verify WebM playback. Add 6,000 × 1,000 `wide.webp`, 1,000 × 6,000 `tall.webp`, and 4,000 × 4,000 `square.webp` fixtures with simple content to exercise the linked decoder's size bounds.
+
+The window step sends keys to the app, which ignores them while Shift, Ctrl or Alt is held; the test waits for a held key to be released. `tests\VideoPlayback.ps1` checks the WPF player against `.build\Application.exe` and a generated 320 × 180 video of at least five seconds. In `browser`, `npm test` builds the offline page and runs the packaging check, the Chrome test and the Firefox test; the Firefox test needs `geckodriver` on `PATH` or its path in `MEDIA_REVIEWER_GECKODRIVER`.
 
 Use `-DraftModel` with the path to the approved `Marqo-NSFW-384.onnx` to include native AI inference in the smoke test. To reproduce the model export, use `native/export-marqo.py` with Marqo's original `model.safetensors` and the output filename. The export uses PyTorch 2.6.0 CPU, torchvision 0.21.0, timm 1.0.15, ONNX 1.17.0 and ONNX Runtime 1.21.1. The exporter checks the original checkpoint and verifies the conversion on generated inputs. [Marqo's original checkpoint](https://huggingface.co/Marqo/nsfw-image-detection-384/blob/main/model.safetensors)
 

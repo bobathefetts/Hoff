@@ -58,6 +58,7 @@ namespace MediaReviewer {
         void Text(string name,string value){Get<TextBlock>(name).Text=value??"";}
         void Message(string value){Text("MessageText",value);}
         bool Ready {get{return engine!=null && engine.Ready && !engine.Faulted && !closing && !switchingCatalog;}}
+        internal bool IsClosing {get{return closing;}}
         static string Id(){return Guid.NewGuid().ToString("N");}
 
         internal ReviewerWindow(Window window,bool persistWorkspace=true) {
@@ -67,7 +68,9 @@ namespace MediaReviewer {
             selection=new GallerySelection(Get<ScrollViewer>("GalleryScroll"),list,cards);
             selection.Changed+=(s,e)=>UpdateControls();
             timer=new DispatcherTimer(DispatcherPriority.Background,window.Dispatcher){Interval=TimeSpan.FromMilliseconds(100)};
-            timer.Tick+=(s,e)=>Tick();timer.Start();
+            // The window smoke test runs the tick unguarded so a regression fails the run with a stack trace. The
+            // shutdown sequence is unguarded too: a swallowed fault there would leave a window that can never close.
+            timer.Tick+=(s,e)=>{if(persistWorkspace && !closing)Guard(Tick);else Tick();};timer.Start();
             window.Closing+=Closing;
             Click("CatalogButton",ChooseDatabase);
             Click("BrowseButton",()=>{string selected=ChooseFolder("Choose a media source",Box("SourceBox").Text);if(selected!=null)Box("SourceBox").Text=selected;});
@@ -119,7 +122,7 @@ namespace MediaReviewer {
         void Click(string name,Action action){Button(name).Click+=(s,e)=>Guard(action);}
         void SetUpCommandSections() {
             Action summarize=()=>{
-                string mode=(string)((ComboBoxItem)Combo("ModeBox").SelectedItem).Content;
+                var modeItem=Combo("ModeBox").SelectedItem as ComboBoxItem;string mode=modeItem==null ? "" : (string)modeItem.Content;
                 int workers=Number("WorkerBox");
                 string age=Box("AgeBox").Text.Trim();
                 Get<Expander>("ScanSettingsExpander").Header="Scan settings · "+mode+" · "+workers+" workers"+(age=="0" ? "" : " · age limit");
@@ -130,14 +133,14 @@ namespace MediaReviewer {
                 Get<Expander>("FiltersExpander").Header="Filters and display · "+(type==null ? "All types" : type.Content)+(smart!=null && !String.IsNullOrEmpty((string)smart.Tag) ? " · "+smart.Content : "")+" · "+(sort==null ? "First found" : sort.Content)+(String.IsNullOrWhiteSpace(Box("FolderBox").Text) ? "" : " · folder filter");
                 Get<Expander>("ReviewNotesExpander").Header="Reviewer and notes · "+(String.IsNullOrWhiteSpace(Box("ReviewerBox").Text) ? "No reviewer label" : Box("ReviewerBox").Text)+(String.IsNullOrWhiteSpace(Box("NotesBox").Text) ? "" : " · notes entered");
             };
-            foreach(string name in new[]{"ModeBox","WorkerBox","TypeBox","SmartFilterBox","SortBox"})Combo(name).SelectionChanged+=(s,e)=>summarize();
-            foreach(string name in new[]{"AgeBox","FolderBox","ReviewerBox","NotesBox"})Box(name).TextChanged+=(s,e)=>summarize();
+            foreach(string name in new[]{"ModeBox","WorkerBox","TypeBox","SmartFilterBox","SortBox"})Combo(name).SelectionChanged+=(s,e)=>Guard(summarize);
+            foreach(string name in new[]{"AgeBox","FolderBox","ReviewerBox","NotesBox"})Box(name).TextChanged+=(s,e)=>Guard(summarize);
             Box("FolderBox").KeyDown+=(s,e)=>{if(e.Key==Key.Enter){e.Handled=true;NewPage(1);}};
             // Keep a useful gallery area even with several sections open on a short screen.
             Window.SizeChanged+=(s,e)=>Get<FrameworkElement>("TopControls").MaxHeight=Math.Max(220,Math.Min(400,Window.ActualHeight*0.44));
-            summarize();
+            Guard(summarize);
         }
-        void Guard(Action action){try{action();}catch(Exception e){Message(e.GetBaseException().Message);}}
+        void Guard(Action action){try{action();}catch(Exception e){Console.Error.WriteLine(e);Message(e.GetBaseException().Message);}}
         void Queue(string id,Action<UiResult> action){pending.Add(id,action);}
         void Work(string id,string label,Action<UiResult> complete=null,bool notifyOnFailure=false) {
             task=id;Message(label+" queued…");
@@ -216,7 +219,7 @@ namespace MediaReviewer {
                 Combo("PageSizeBox").SelectedItem=r.Preferences.PageSize;
                 Combo("WorkerBox").SelectedItem=r.Preferences.WorkerCount;
                 Combo("FitBox").SelectedIndex=r.Preferences.Fit=="UniformToFill" ? 1 : 0;
-                Combo("ModeBox").SelectedIndex=Array.IndexOf(new[]{"Quick","Deep","Custom"},r.Preferences.Mode);
+                Combo("ModeBox").SelectedIndex=Math.Max(0,Array.IndexOf(new[]{"Quick","Deep","Custom"},r.Preferences.Mode));
                 Box("ReviewerBox").Text=String.IsNullOrEmpty(r.Preferences.Reviewer) ? WindowsReviewerLabel() : r.Preferences.Reviewer;Box("AgeBox").Text=r.Preferences.ModifiedAgeYears.ToString(CultureInfo.InvariantCulture);
                 options.Families=r.Preferences.Families;options.IncludeApplicationData=r.Preferences.IncludeApplicationData;
                 options.IncludeRootFiles=r.Preferences.IncludeRootFiles;options.ScanArchives=r.Preferences.ScanArchives;
@@ -427,7 +430,19 @@ namespace MediaReviewer {
                     undoStack.Remove(entry);
                     refresh=true;
                 }
-                Message(r.Success ? "Review undone." : "Undo failed. "+r.Error);
+                // The item was edited after this review (for example its notes were saved). While the step is still on
+                // top, nothing can make it apply again: only undoing a later step restores an earlier revision. Drop it,
+                // otherwise every later Ctrl+Z retries it and older steps are unreachable. If a newer review was saved
+                // while this Undo was in flight, the step is no longer on top and undoing that review re-arms it, so keep it.
+                bool stale=!r.Success && r.ReviewChanged && undoStack.Count>0 && ReferenceEquals(undoStack[undoStack.Count-1],entry);
+                if(stale){
+                    undoStack.Remove(entry);
+                    refresh=true;
+                }
+                Message(r.Success ? "Review undone." : stale
+                    ? "That review can no longer be undone because the item was changed afterwards (for example its notes were edited). Nothing was changed."+
+                        (undoStack.Count>0 ? " Earlier reviews can still be undone." : "")
+                    : "Undo failed. "+r.Error);
                 UpdateControls();
             });
             UpdateControls();

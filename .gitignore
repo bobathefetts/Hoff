@@ -3,3 +3,9 @@
 node_modules/
 *.sqlite-wal
 *.sqlite-shm
+# Gemma and Marqo model files belong next to the built executable, never in the source tree.
+*.gguf
+*.onnx
+# IDE and dotnet build outputs; build.ps1 writes to .build/ and dist/ instead.
+obj/
+bin/
