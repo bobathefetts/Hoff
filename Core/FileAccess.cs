@@ -7,9 +7,27 @@ using System.Security.Cryptography;
 using System.Threading;
 namespace MediaReviewer {
     internal sealed class SourceEntry {
-        internal string Name; internal FileAttributes Attributes; internal long Size,ModifiedTicks;
+        internal string Name; internal FileAttributes Attributes; internal long Size,ModifiedTicks; internal uint ReparseTag;
         internal bool Directory { get { return (Attributes&FileAttributes.Directory)!=0; } }
-        internal bool Reparse { get { return (Attributes&FileAttributes.ReparsePoint)!=0; } }
+        internal bool Shortcut { get { return IsShortcut(Attributes,ReparseTag); } }
+        // Links are not followed: name-surrogate reparse points (symbolic links, junctions and mount points), entries
+        // whose tag cannot be read, and two kinds that cannot be opened as files at all (app execution aliases and
+        // Unix sockets). Other reparse points, such as deduplicated, tiered, compressed or cloud files, hold the entry's
+        // own content and are scanned like any other file. A DFS link also falls in that group; following it is what
+        // scanning a DFS namespace needs.
+        internal static bool IsShortcut(FileAttributes attributes,uint tag) {
+            return (attributes&FileAttributes.ReparsePoint)!=0 && (tag==0 || (tag&0x20000000U)!=0 || tag==0x8000001BU || tag==0x80000023U);
+        }
+        // Windows puts these hidden, system junctions in every profile for old programs. They point to folders in the
+        // same profile, which the scan reaches anyway, so they are skipped without being counted or logged.
+        static readonly HashSet<string> CompatibilityNames=new HashSet<string>(StringComparer.OrdinalIgnoreCase) {
+            "All Users","Default User","Application Data","Cookies","Local Settings","My Documents","NetHood","PrintHood",
+            "Recent","SendTo","Start Menu","Templates","My Music","My Pictures","My Videos","History","Temporary Internet Files"};
+        internal bool CompatibilityLink {
+            get { return Shortcut && Directory && (Attributes&(FileAttributes.Hidden|FileAttributes.System))==(FileAttributes.Hidden|FileAttributes.System) && CompatibilityNames.Contains(Name); }
+        }
+        // Cloud placeholders and tiered or archived files are fetched from elsewhere when read.
+        internal bool StoredElsewhere { get { return (Attributes&(FileAttributes.Offline|(FileAttributes)0x400000))!=0; } }
     }
     internal sealed class FileStamp {
         internal long Size,ModifiedTicks; internal string Identity;
@@ -90,7 +108,9 @@ namespace MediaReviewer {
             try {
                 while(true) {
                     token.ThrowIfCancellationRequested();
-                    if(data.Name!="." && data.Name!="..") yield return new SourceEntry { Name=data.Name,Attributes=(FileAttributes)data.Attributes,Size=((long)data.SizeHigh<<32)|data.SizeLow,ModifiedTicks=Ticks(data.Write) };
+                    // FindFirstFile reports the reparse tag in dwReserved0 only when the reparse-point attribute is set.
+                    if(data.Name!="." && data.Name!="..") yield return new SourceEntry { Name=data.Name,Attributes=(FileAttributes)data.Attributes,Size=((long)data.SizeHigh<<32)|data.SizeLow,ModifiedTicks=Ticks(data.Write),
+                        ReparseTag=(data.Attributes&0x400)!=0 ? data.Reserved0 : 0 };
                     if(!FindNextFile(handle,out data)) { int code=Marshal.GetLastWin32Error(); if(code!=18) throw Failure(code,"Directory listing stopped:",path); break; }
                 }
             } finally { FindClose(handle); }

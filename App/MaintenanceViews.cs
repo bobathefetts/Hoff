@@ -187,7 +187,8 @@ namespace MediaReviewer {
             var body=new StackPanel {Margin=new Thickness(16)};var dialog=Dialog("Export review report",body,550,390);
             body.Children.Add(Label("Reports contain saved non-compliant decisions and recorded locations. Choose a new output file or folder."));
             var formats=new ComboBox {MinHeight=32};formats.Items.Add("CSV spreadsheet");formats.Items.Add("Offline HTML folder with CSV");formats.SelectedIndex=0;body.Children.Add(formats);
-            var previews=new CheckBox {Content="Include saved previews in the HTML report",IsChecked=true,IsEnabled=false};body.Children.Add(previews);
+            // Off by default: a report is often shared, and anyone who opens it would see the non-compliant pictures.
+            var previews=new CheckBox {Content=new TextBlock {Text="Embed thumbnails of the non-compliant pictures (anyone who opens the report sees them)",TextWrapping=TextWrapping.Wrap},IsChecked=false,IsEnabled=false};body.Children.Add(previews);
             formats.SelectionChanged+=(s,e)=>previews.IsEnabled=formats.SelectedIndex==1;
             var safe=new CheckBox {Content="Protect spreadsheet text from formulas",IsChecked=true};body.Children.Add(safe);
             var evidence=new CheckBox {Content="Include authenticated Evidence details in plaintext"};body.Children.Add(evidence);

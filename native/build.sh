@@ -56,7 +56,7 @@ gemma_libraries=("$gemma/win/tools/mtmd/libmtmd.a" "$gemma/win/src/libllama.a" "
 "$toolchain/x86_64-w64-mingw32-clang" -O2 -DHAVE_AV_CONFIG_H -I"$codecs" -I"$dav1d/include" \
     -c "$codecs/libavcodec/libdav1d.c" -o ffmpeg-dav1d.o
 "$toolchain/x86_64-w64-mingw32-clang" -O2 -static -municode -mwindows -I"$codecs" \
-    -Wl,--dynamicbase,--nxcompat,--high-entropy-va \
+    -Wl,--dynamicbase,--nxcompat,--high-entropy-va,--dependent-load-flag=0x800 \
     "$root/native/host.c" "$root/native/decode.c" "$root/native/playback.c" "$root/native/exports.def" application.res sqlite.o ffmpeg-dav1d.o draft_model.o gemma_draft.o gemma_vulkan_win.o \
     -L"$codecs/libavformat" -L"$codecs/libavcodec" -L"$codecs/libswscale" -L"$codecs/libavutil" -L"$codecs/libavfilter" -L"$codecs/libswresample" \
     -Wl,--start-group "$codecs/mcr-cli/libmcr-ffmpeg.a" -lavfilter -lavformat -lavcodec -lswscale -lswresample -lavutil -Wl,--end-group \

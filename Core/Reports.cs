@@ -9,7 +9,8 @@ using System.Web.Script.Serialization;
 namespace MediaReviewer {
     public sealed class ReportOptions {
         public string Destination,Format="Csv";
-        public bool IncludeEvidence,IncludeSavedPreviews=true,SpreadsheetSafeText=true;
+        // Thumbnails are embedded only when asked for: a report is often shared, and they show the flagged pictures.
+        public bool IncludeEvidence,IncludeSavedPreviews,SpreadsheetSafeText=true;
         internal ReportOptions Copy(){return (ReportOptions)MemberwiseClone();}
         internal void Validate(){if(String.IsNullOrEmpty(Destination) || Destination.Length>32000 || (Format!="Csv" && Format!="HtmlDirectory"))throw new ArgumentException("Choose a new CSV file or HTML report folder.");Destination=Paths.Source(Destination);if(Path.GetFileName(Destination).IndexOf(':')>=0)throw new ArgumentException("Alternate output streams are not supported.");}
     }

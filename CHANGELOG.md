@@ -2,6 +2,38 @@
 
 Hoff is a fork of [Charlie22911/FleetHacker](https://github.com/Charlie22911/FleetHacker), based on its 0.3.23-preview source. This file lists what the fork has changed. The downloads on the [latest release](https://github.com/bobathefetts/Hoff/releases/latest) are built from this source.
 
+## 2026-11-11
+
+Fixes from an external code review. Each finding was first checked against the code; these are the ones fixed today.
+
+### Scanning
+
+- **Only links are skipped.** A scan used to skip every file or folder that Windows marks as a reparse point. That includes deduplicated, tiered and archived files on file servers, so those files went unreviewed. Now only links are skipped: junctions, symbolic links and mount points, which can lead outside the folder being scanned, plus entries whose type cannot be read and two kinds that cannot be opened as files (app execution aliases and Unix sockets). Other reparse points are scanned like ordinary files. Reading a tiered or archived file makes the server fetch it, which can be slow.
+- **Skipped links are reported, not counted as done.** A skipped entry was counted as a processed file, so the progress bar could show a scan as complete while files had been left out. Links now have their own count. The activity line and the finished scan say how many were not followed, the first 20 are named in the diagnostics log, and the scan summary gives the total. Windows' own hidden compatibility junctions in each profile (such as `My Documents` and `Documents\My Music`) point to folders the scan reaches anyway, so they are skipped without being counted.
+- **Files stored elsewhere are not fetched just to check their type.** A cloud placeholder or a tiered or archived file with an unknown extension is no longer read to look for renamed media, because reading it downloads or recalls it. Files with a selected media extension are still scanned.
+- **Files read and found not to be media always count as processed**, also when renamed-media checking is turned off, so the progress bar can reach 100%.
+- Scans started before this change keep their old results when resumed. Start a fresh scan to pick up files an earlier scan skipped.
+
+### Safety
+
+- **Videos open only when you press Play.** Selecting a video in Quick Review (after a third of a second) or opening it in Inspect used to load it at once through Windows Media Foundation, inside the main app, on a file from the scanned drive. Now only the saved poster, the controls and a ▶ badge appear until you press Play.
+- **A DLL placed beside the exe is never loaded.** Windows used to look in the exe's own folder first for some system DLLs, such as `bcrypt.dll`, so a file with that name in the same folder (for example in Downloads) ran inside the app. The exe now loads its imported DLLs, and any DLL loaded by name later, from System32 only.
+- **HTML reports leave thumbnails out unless asked.** The "embed thumbnails" box in **Export review report** now starts unticked, and its label says that anyone who opens the report sees the pictures.
+- **New originals passwords need at least 12 characters** in the Windows app, both when the vault is created and when the password is changed. The browser edition is unchanged. The password window now says why nothing happened (empty, too short, or the two entries differ) instead of staying open silently. Existing shorter passwords still unlock.
+
+### Messages and documentation
+
+- Error messages name this app (`Media Compliance Reviewer.exe`, or whatever the exe is called) instead of `FleetHacker.exe` or a `MediaReviewer.Decoder.exe` that does not exist, and the AI-worker message says it may have crashed, run out of memory or been blocked by security software.
+- The README explains how to make the Marqo model file, with the exact Python and package versions and the size and SHA-256 to check.
+- The README, the browser README and the browser edition's start screen advise opening the browser edition in a browser profile kept only for reviewing, because other HTML files opened from disk in the same profile can read its saved data.
+- Two unused browser files (`media-database-bridge.js`, `media-database-host.js`) were removed. They were never part of the built HTML.
+
+### Tests
+
+- The self-test checks the link rule against real junctions (including a Windows-style compatibility junction) and the reparse types used for deduplicated, tiered, compressed, cloud and DFS entries, the new-password rule, and that HTML reports embed thumbnails only on request.
+- The first-scan window test checks that a video selected in Quick Review or opened in Inspect is not opened before Play.
+- `tests\Smoke.ps1` runs the window test from a folder holding copies of System32 DLLs and fails if any of them is loaded from there, and fails if a message names the wrong program.
+
 ## 2026-11-10
 
 ### Desktop app: everyday use

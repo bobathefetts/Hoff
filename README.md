@@ -7,6 +7,8 @@ Media Compliance Reviewer for Windows is an offline C#/.NET desktop tool for fin
 - [Download for Windows (.exe)](https://github.com/bobathefetts/Hoff/releases/latest/download/Media.Compliance.Reviewer.exe)
 - [Download the offline browser preview (.html)](https://github.com/bobathefetts/Hoff/releases/latest/download/Media.Compliance.Reviewer.WebAssembly.html)
 
+If you use the browser preview, open it in a browser profile kept only for reviewing: other HTML files opened from disk in the same profile can read its saved data (see the [browser README](browser/README.md)).
+
 These links always fetch the newest build of this fork (Hoff). The [release page](https://github.com/bobathefetts/Hoff/releases/latest) includes both source archives, and [CHANGELOG.md](CHANGELOG.md) lists what the fork has changed since the original [FleetHacker 0.3.23-preview](https://github.com/Charlie22911/FleetHacker/releases/tag/v0.3.23-preview). See the [FleetHacker overview presentation](docs/FleetHacker-Overview.pptx) for the review workflow and an example of how verified matches reduce repeat work.
 
 Made by IT1 Charlie McPherson, IT1 Joshua Maulden, and IT2 Alexander Harris. **Made at FleetHacker 2026**.
@@ -23,6 +25,17 @@ Open the downloaded HTML directly in desktop Chrome, Edge, or Firefox. It provid
 
 - [Download `gemma-4-E2B-it-Q4_0.gguf` (language model, 2.84 GB)](https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/6938c58e698502037401a5f19f6905f2fb2f7dee/gemma-4-E2B-it-Q4_0.gguf?download=true)
 - [Download `mmproj-gemma-4-E2B-it-Q8_0.gguf` (vision projector, 557 MB)](https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/6938c58e698502037401a5f19f6905f2fb2f7dee/mmproj-gemma-4-E2B-it-Q8_0.gguf?download=true)
+
+## Get the Marqo model
+
+The Marqo file is not part of the download. Make it once from Marqo's published weights (Apache 2.0):
+
+1. Download [Marqo's original checkpoint](https://huggingface.co/Marqo/nsfw-image-detection-384/resolve/main/model.safetensors?download=true) (`model.safetensors`). The export script checks its SHA-256 and stops if the file is different.
+2. Install Python 3.12 and, in a virtual environment, these exact versions: torch 2.6.0 and torchvision 0.21.0 (CPU builds), timm 1.0.15, onnx 1.17.0, onnxruntime 1.21.1, numpy 2.5.4, safetensors 0.8.0 and protobuf 7.36.2.
+3. From this repository, run `python native/export-marqo.py model.safetensors Marqo-NSFW-384.onnx`.
+4. Check the result before use. It must be exactly 22,472,568 bytes, and `Get-FileHash Marqo-NSFW-384.onnx` must print SHA-256 `2E0EAD404A2527E4F5F81F053519F8D315C9BA8DB42FFDFC3309F08061BFE8BA`. The app refuses any other file.
+
+With these versions the export reproduces the required file exactly; this was checked on Windows 11 with Python 3.12.
 
 ## Open a catalog and scan
 
@@ -60,7 +73,7 @@ This is an unsigned development preview. Use a copy of an existing catalog for e
 
 ## AI draft check
 
-1. For advanced review, [download both Gemma files](#download-gemma-for-advanced-ai-review). Gemma requires a CPU with AVX2, FMA and F16C and uses more time and memory than Marqo. For Marqo, place `Marqo-NSFW-384.onnx` beside the executable on a local fixed drive.
+1. For advanced review, [download both Gemma files](#download-gemma-for-advanced-ai-review). Gemma requires a CPU with AVX2, FMA and F16C and uses more time and memory than Marqo. For Marqo, place `Marqo-NSFW-384.onnx` beside the executable on a local fixed drive. See [Get the Marqo model](#get-the-marqo-model) for how to make that file.
 2. Finish or pause your scan, then choose **AI draft check**. Select a model and threshold and choose **Save and run**. **Save settings** updates the queue from scores already saved. Each model has its own scores and threshold. The catalog remembers your selection, with Marqo as the default when the Gemma pair is unavailable.
 3. Open **AI suggestions** to inspect flagged items, with the highest scores first by default. Use the usual Compliant or Non-compliant controls to make a decision. A saved decision clears the suggestion. The regular **To be reviewed** queue includes all items awaiting a human decision.
 

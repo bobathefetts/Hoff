@@ -538,7 +538,8 @@ namespace MediaReviewer {
             if(engine==null)return;
             status=engine.Status;
             Text("ActivityText",status.RunningScan ? String.Format("{0} · user {1}/{2} · {3:N0}/{4:N0} files processed · {5:N0} errors · {6:N0} queued · WAL {7:N1} MiB",
-                status.Stage,status.CompletedUsers,status.TotalUsers,status.ProcessedFiles,status.DiscoveredFiles,status.FailedFiles,status.QueueCount,status.WalBytes/1048576.0) : status.Stage);
+                status.Stage,status.CompletedUsers,status.TotalUsers,status.ProcessedFiles,status.DiscoveredFiles,status.FailedFiles,status.QueueCount,status.WalBytes/1048576.0)+
+                (status.NotFollowed>0 ? " · "+ScanRunner.LinksNotFollowed(status.NotFollowed) : "") : status.Stage);
             if(engine.Faulted && engine.DetectedHtml && pending.Count==0){OfferImport();return;}
             if(engine.Faulted && !String.IsNullOrEmpty(status.Error))Message(status.Error);
             if(engine.Faulted)pendingStart=null;

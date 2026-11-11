@@ -3,7 +3,7 @@
 #media-startup-screen::backdrop{background:#0b1220}
 #media-startup-screen h2{margin:0 0 1rem;font-size:1.25rem;line-height:1.35;overflow-wrap:anywhere}
 #media-startup-screen p{margin:.75rem 0;overflow-wrap:anywhere}
-#media-startup-note{color:#a6b6ce;font-size:.9rem}
+#media-startup-note,#media-startup-privacy{color:#a6b6ce;font-size:.9rem}
 #media-startup-spinner{width:2rem;height:2rem;margin-bottom:1rem;border:3px solid #2b3b55;border-top-color:#69b7ff;border-radius:50%;animation:media-startup-spin 1.2s linear infinite}
 #media-startup-actions{display:flex;flex-wrap:wrap;gap:.6rem;margin-top:1.25rem}
 #media-startup-actions[hidden],#media-startup-spinner[hidden]{display:none}
@@ -12,11 +12,12 @@
 @keyframes media-startup-spin{to{transform:rotate(360deg)}}
 @media(prefers-reduced-motion:reduce){#media-startup-spinner{animation:none}}
 </style>
-<dialog id="media-startup-screen" open aria-labelledby="media-startup-title" aria-describedby="media-startup-phase media-startup-note" aria-busy="true">
+<dialog id="media-startup-screen" open aria-labelledby="media-startup-title" aria-describedby="media-startup-phase media-startup-note media-startup-privacy" aria-busy="true">
 <div id="media-startup-spinner" aria-hidden="true"></div>
 <h2 id="media-startup-title">Starting Media Compliance Reviewer</h2>
 <p id="media-startup-phase" role="status" aria-live="polite">Loading the offline application…</p>
 <p id="media-startup-note">Please wait. Database controls will be available when startup finishes.</p>
+<p id="media-startup-privacy">Use a browser profile kept only for reviewing. Other HTML files opened from disk in the same profile can read this tool's saved previews, notes and paths.</p>
 <div id="media-startup-actions" hidden><button id="media-startup-reload" type="button">Reload tool</button><button id="media-startup-close" type="button">Close message</button></div>
 </dialog>
 <script id="media-startup-script">

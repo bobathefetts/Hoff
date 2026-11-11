@@ -27,9 +27,18 @@ namespace MediaReviewer {
         VaultKey OpenVaultKey(SqliteConnection db,byte[] password,CancellationToken token){
             try{return VaultDescriptor.Read(db).Open(EvidenceFormat.Workspace(db),password,token);}finally{if(password!=null)Array.Clear(password,0,password.Length);}
         }
+        // A new or changed originals password must have at least this many characters. Existing passwords of any
+        // length still unlock, so catalogs created before the rule keep working.
+        public const int MinimumNewPasswordCharacters=12;
+        internal static void RequireNewPasswordLength(byte[] passwordUtf8){
+            int characters;
+            try{characters=new UTF8Encoding(false,true).GetCharCount(passwordUtf8);}catch(DecoderFallbackException){characters=0;}
+            if(characters<MinimumNewPasswordCharacters)throw new ArgumentException("Use at least "+MinimumNewPasswordCharacters+" characters for a new originals password.");
+        }
         public string RequestVaultPasswordChange(byte[] currentPassword,byte[] newPassword,string operationId){
             Action clear=()=>{if(currentPassword!=null)Array.Clear(currentPassword,0,currentPassword.Length);if(newPassword!=null)Array.Clear(newPassword,0,newPassword.Length);};
             if(currentPassword==null || currentPassword.Length<1 || currentPassword.Length>65536 || newPassword==null || newPassword.Length<1 || newPassword.Length>65536 || Object.ReferenceEquals(currentPassword,newPassword) || String.IsNullOrEmpty(operationId) || operationId.Length>100){clear();throw new ArgumentException("Enter bounded current and new passwords and a valid operation identifier");}
+            try{RequireNewPasswordLength(newPassword);}catch{clear();throw;}
             long epoch=InvalidateVault();
             return EnqueueOperation("VaultPasswordChange",(db,t,p)=>{
                 lock(vaultStateGate){t.ThrowIfCancellationRequested();if(epoch!=VaultGeneration)throw new OperationCanceledException();ClearVaultWorker();}

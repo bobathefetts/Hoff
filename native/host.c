@@ -79,6 +79,11 @@ done:
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, PWSTR arguments, int show) {
     int exit_code = 1;
     const wchar_t *stage = L"reading the embedded application";
+    /* The exe ships alone and needs no DLL from its own folder, which is often Downloads. The link step sets
+       --dependent-load-flag=0x800 so the static imports (such as bcrypt.dll) come from System32 only; this does the
+       same for every DLL loaded by name later, so a DLL planted beside the exe is never picked up. Folders that
+       code in the process adds on purpose with AddDllDirectory are still searched. */
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32 | LOAD_LIBRARY_SEARCH_USER_DIRS);
     HRESULT init = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     HRESULT hr = FAILED(init) ? init : run(instance, &exit_code, &stage);
     if (SUCCEEDED(init)) CoUninitialize();

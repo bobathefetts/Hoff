@@ -92,7 +92,7 @@ namespace MediaReviewer {
                     while(engine.Status.RunningScan && !engine.Faulted){
                         if(Volatile.Read(ref cancelled)!=0 && !requested){requested=true;engine.CancelScan();}
                         var state=engine.Status;
-                        if(elapsed.ElapsedMilliseconds>=next){Console.WriteLine(state.Stage+" · "+state.ProcessedFiles+"/"+state.DiscoveredFiles+" files · "+state.FailedFiles+" errors");next=elapsed.ElapsedMilliseconds+1000;}
+                        if(elapsed.ElapsedMilliseconds>=next){Console.WriteLine(state.Stage+" · "+state.ProcessedFiles+"/"+state.DiscoveredFiles+" files · "+state.FailedFiles+" errors"+(state.NotFollowed>0 ? " · "+ScanRunner.LinksNotFollowed(state.NotFollowed) : ""));next=elapsed.ElapsedMilliseconds+1000;}
                         Thread.Sleep(100);
                     }
                     var result=engine.Status;Console.WriteLine(result.Stage);

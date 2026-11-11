@@ -102,7 +102,7 @@ namespace MediaReviewer {
             if(includeExit && process!=null && started && process.WaitForExit(100))exit=process.ExitCode;
             if(job!=null){job.StopAndWait();job.Dispose();job=null;}
             // Confirm exit before replacement: blocked OS I/O must never create abandoned helpers.
-            if(process!=null){if(started){if(!process.HasExited){try{process.Kill();}catch(InvalidOperationException){}}process.WaitForExit();}if(input!=null)input.Dispose();if(output!=null)output.Dispose();if(stderr!=null){try{detail=stderr.GetAwaiter().GetResult();}catch{}};process.Dispose();process=null;input=null;output=null;stderr=null;started=false;}retiring=false;return includeExit ? exit.HasValue ? StartupDiagnostics.ProcessExit("MediaReviewer.Decoder.exe",exit.Value,detail) : "MediaReviewer.Decoder.exe closed its response stream and was stopped by its owner before a natural exit status was available. "+detail : detail;
+            if(process!=null){if(started){if(!process.HasExited){try{process.Kill();}catch(InvalidOperationException){}}process.WaitForExit();}if(input!=null)input.Dispose();if(output!=null)output.Dispose();if(stderr!=null){try{detail=stderr.GetAwaiter().GetResult();}catch{}};process.Dispose();process=null;input=null;output=null;stderr=null;started=false;}retiring=false;return includeExit ? exit.HasValue ? StartupDiagnostics.ProcessExit("The media worker ("+Product.ExecutableName+")",exit.Value,detail) : "The media worker ("+Product.ExecutableName+") closed its response stream and was stopped by its owner before a natural exit status was available. "+detail : detail;
         }
         public void Dispose(){lock(gate){disposed=true;Retire();}}
     }

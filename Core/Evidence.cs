@@ -80,6 +80,7 @@ namespace MediaReviewer {
                 lock(vaultStateGate){token.ThrowIfCancellationRequested();if(epoch!=VaultGeneration)throw new OperationCanceledException();ClearVaultWorker();}VaultKey derived=null;try{
                     bool creating=db.Scalar("SELECT 1 FROM evidence_vault WHERE id=1")==null;
                     if(creating && !createIfMissing)throw new InvalidOperationException("Create an originals vault first.");
+                    if(creating)RequireNewPasswordLength(passwordUtf8);
                     byte[] salt=creating ? EvidenceFormat.Random(16) : null;int iterations=600000;
                     progress(0,1,"password key derivation");derived=creating ? Crypto.DeriveKey(passwordUtf8,salt,iterations) : OpenVaultKey(db,passwordUtf8,token);token.ThrowIfCancellationRequested();
                     string ws=EvidenceFormat.Workspace(db);byte[] expected=Encoding.UTF8.GetBytes("ImageComplianceReviewer evidence vault v1");

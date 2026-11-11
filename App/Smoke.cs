@@ -53,6 +53,46 @@ namespace MediaReviewer {
             using(var database=new SqliteConnection(catalog,true))
                 Check(Convert.ToInt64(database.Scalar("SELECT COUNT(*) FROM review_groups WHERE retired=0 AND status=?","COMPLIANT"))==3,"Three highlighted items in a row were not all saved as Compliant.");
             CheckPageBoxKeepsTyping(controller);
+            CheckVideoWaitsForPlay(controller,source);
+        }
+        // A video comes from the scanned drive, so it is untrusted. Opening one starts the Windows media pipeline inside
+        // this process. Selecting a video in Quick Review or Inspect must therefore only show its poster and controls,
+        // and the video must open only when the reviewer presses Play.
+        static void CheckVideoWaitsForPlay(ReviewerWindow controller,string source) {
+            var window=controller.Window;
+            var row=new MediaRow {GroupId=900001,ContentId=900001,RootId="fixture-root",RootPath=source,RelativePath=Path.Combine("example.user","clip.mp4"),
+                Name="clip.mp4",Extension="mp4",Status="TO_REVIEW",Size=1,PreviewState="unavailable"};
+            // Let page requests from the earlier checks finish first, so none of them replaces the fixture page.
+            Pause(TimeSpan.FromSeconds(1.5));
+            // A revision far ahead of the catalog's keeps the window's own refresh from replacing this fixture page.
+            controller.ApplyPage(new PageData {Page=1,PageSize=60,Total=1,Revision=Int64.MaxValue,Rows=new List<MediaRow>{row}});
+            WaitForWindow(()=>controller.CardNames.SequenceEqual(new[]{"clip.mp4"}),"The video card did not appear in the list.");
+            ((Button)window.FindName("QuickModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            WaitForWindow(()=>controller.QuickPlayer!=null,"Quick Review did not show the controls for a video (cards: "+String.Join(", ",controller.CardNames)+").");
+            var quick=controller.QuickPlayer;
+            Pause(TimeSpan.FromSeconds(1));
+            Check(ReferenceEquals(controller.QuickPlayer,quick),"The video stopped being the Quick Review item, so the check below would prove nothing.");
+            Check(!quick.LoadRequested,"Selecting a video in Quick Review must not open it before Play is pressed.");
+            ((Button)window.FindName("QuickInspectButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Pause(TimeSpan.FromSeconds(1));
+            var inspection=window.OwnedWindows.OfType<Window>().SingleOrDefault(w=>w.Title.StartsWith("Inspect · "));
+            Check(inspection!=null,"Inspect did not open for the video: "+((TextBlock)window.FindName("MessageText")).Text);
+            var players=Descendants<VideoPlaybackControls>(inspection).ToList();
+            Check(players.Count==1 && !players[0].LoadRequested,"Opening a video in Inspect must not open it before Play is pressed.");
+            inspection.Close();
+            ((Button)window.FindName("ListModeButton")).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }
+        // Lets the window run for a while, so timers and queued work get their chance.
+        static void Pause(TimeSpan duration) {
+            var elapsed=Stopwatch.StartNew();
+            WaitForWindow(()=>elapsed.Elapsed>=duration,"The window did not keep running.");
+        }
+        static IEnumerable<T> Descendants<T>(DependencyObject parent) where T:DependencyObject {
+            for(int i=0;i<VisualTreeHelper.GetChildrenCount(parent);i++){
+                var child=VisualTreeHelper.GetChild(parent,i);
+                var match=child as T;if(match!=null)yield return match;
+                foreach(var inner in Descendants<T>(child))yield return inner;
+            }
         }
         // While a scan runs the list refreshes about once a second. A refresh must not put the current page number back
         // over a number the reviewer is typing, including between the last keystroke and the click on Jump.
@@ -610,6 +650,14 @@ namespace MediaReviewer {
                 Result(engine,engine.RequestReport(new ReportOptions {Destination=report,IncludeEvidence=true}));
                 string reportText=File.ReadAllText(report);
                 Check(reportText.Contains("test.png") && reportText.Contains("smoke test"),"Evidence was missing from the explicitly requested report.");
+                // An HTML report embeds the flagged pictures only when that is explicitly asked for.
+                Func<string,string> htmlOf=reportFolder=>String.Concat(Directory.GetFiles(reportFolder,"*.html",SearchOption.AllDirectories).Select(File.ReadAllText));
+                string plainReport=Path.Combine(directory,"report-plain"),thumbnailReport=Path.Combine(directory,"report-thumbnails");
+                Result(engine,engine.RequestReport(new ReportOptions {Destination=plainReport,Format="HtmlDirectory",IncludeEvidence=true}));
+                string plainHtml=htmlOf(plainReport);
+                Check(plainHtml.Contains("test.png") && !plainHtml.Contains("data:image"),"An HTML report must not embed thumbnails unless asked to.");
+                Result(engine,engine.RequestReport(new ReportOptions {Destination=thumbnailReport,Format="HtmlDirectory",IncludeEvidence=true,IncludeSavedPreviews=true}));
+                Check(htmlOf(thumbnailReport).Contains("data:image"),"An HTML report did not embed thumbnails when asked to.");
                 Result(engine,engine.RequestEvidenceReclassify(new ReviewRequest {OperationId=Guid.NewGuid().ToString("N"),Status="NON_COMPLIANT",Reviewer="fixture",Notes="smoke test",GroupIds=new[]{id}}));
                 var flagged=Result(engine,engine.RequestPage(new PageRequest {Generation=3,Bucket="NON_COMPLIANT"})).Page.Rows.Single();
                 var sheet=Result(engine,engine.RequestCaseSheet(flagged)).Value;
@@ -647,6 +695,8 @@ namespace MediaReviewer {
                 CheckPageRefresh(engine,batch,quickRoot,quickFolder);
             }
             CheckRenamed(directory,image);
+            CheckShortcuts(directory,image);
+            CheckNewPasswordLength(directory);
             CheckArchiveMembers(directory,image);
             CheckReviewedItemsStayReviewed(directory,image);
             CheckReconnectAllCandidates(directory,image);
@@ -968,6 +1018,84 @@ namespace MediaReviewer {
                 Check(row.Name=="renamed.dat" && row.SourcePath==renamed && row.Extension=="png" && row.Algorithm=="sha256" && row.PreviewBytes!=null,"Renamed media did not retain its true filename, media family, preview and full hash.");
                 Check(Result(engine,engine.RequestPage(new PageRequest{Generation=3,Filter="renamed"})).Page.Total==1,"The renamed smart filter did not isolate the mismatched extension item.");
             }
+        }
+        // Only real shortcuts (symbolic links, junctions, mount points) are left out of a scan. Each one is named in the
+        // diagnostics log and counted on its own, never as discovered or processed media. Files a file server stores in a
+        // special way (deduplicated, tiered, compressed, cloud) are reparse points too, but they hold their own content and
+        // must be scanned.
+        static void CheckShortcuts(string directory,string image) {
+            Check(!SourceEntry.IsShortcut(FileAttributes.Archive,0xA000000C),"An entry without the reparse-point attribute is not a shortcut.");
+            Check(SourceEntry.IsShortcut(FileAttributes.Directory|FileAttributes.ReparsePoint,0xA0000003),"A junction or mount point must not be followed.");
+            Check(SourceEntry.IsShortcut(FileAttributes.Archive|FileAttributes.ReparsePoint,0xA000000C),"A symbolic link must not be followed.");
+            Check(SourceEntry.IsShortcut(FileAttributes.Archive|FileAttributes.ReparsePoint,0),"A reparse point whose tag cannot be read must not be followed.");
+            Check(SourceEntry.IsShortcut(FileAttributes.Archive|FileAttributes.ReparsePoint,0x8000001B) && SourceEntry.IsShortcut(FileAttributes.Archive|FileAttributes.ReparsePoint,0x80000023),
+                "App execution aliases and Unix sockets cannot be opened as files and must not be followed.");
+            Check(!SourceEntry.IsShortcut(FileAttributes.Directory|FileAttributes.ReparsePoint,0x8000000A),"A DFS link must be followed.");
+            foreach(uint tag in new uint[]{0x80000013,0xC0000004,0x80000017,0x9000001A})
+                Check(!SourceEntry.IsShortcut(FileAttributes.Archive|FileAttributes.ReparsePoint|FileAttributes.Offline,tag),
+                    "A deduplicated, tiered, compressed or cloud-stored file must be scanned (reparse tag 0x"+tag.ToString("X8")+").");
+            string root=Directory.CreateDirectory(Path.Combine(directory,"shortcut-root")).FullName;
+            string folder=Directory.CreateDirectory(Path.Combine(root,"example.user")).FullName;
+            string outside=Directory.CreateDirectory(Path.Combine(directory,"shortcut-target")).FullName;
+            File.Copy(image,Path.Combine(folder,"inside.png"));
+            // A different picture outside the source folder: it would appear as its own card if a junction were followed.
+            byte[] other=File.ReadAllBytes(image);Array.Resize(ref other,other.Length+1);
+            File.WriteAllBytes(Path.Combine(outside,"outside.png"),other);
+            string nested=Path.Combine(folder,"linked folder"),user=Path.Combine(root,"linked.user");
+            Junction(nested,outside);Junction(user,outside);
+            // Windows' own hidden, system compatibility junctions (such as Documents\My Music) are skipped silently.
+            string compatibility=Path.Combine(folder,"My Music");
+            Junction(compatibility,outside);RunTool("attrib.exe","+h +s /l \""+compatibility+"\"");
+            Check((File.GetAttributes(compatibility)&(FileAttributes.Hidden|FileAttributes.System))==(FileAttributes.Hidden|FileAttributes.System),"Could not mark the test compatibility junction hidden and system.");
+            try{
+                string database=Path.Combine(directory,"shortcuts.sqlite");
+                using(var engine=ReviewerEngine.Open(database,true)){
+                    Wait(()=>engine.Ready || engine.Faulted);Check(engine.Ready,engine.Status.Error);
+                    engine.StartScan(new ScanOptions {RootPath=root,Extensions=new[]{"png"},WorkerCount=1});
+                    Wait(()=>!engine.Status.RunningScan);
+                    var rows=Result(engine,engine.RequestPage(new PageRequest{Generation=1})).Page.Rows;
+                    Check(rows.Count==1 && rows[0].Name=="inside.png","A scan must not follow a junction out of its source folder.");
+                    var status=engine.Status;
+                    Check(status.DiscoveredFiles==1 && status.ProcessedFiles==1 && status.NotFollowed==2,
+                        "Shortcuts must be counted on their own, not as discovered or processed files (discovered "+status.DiscoveredFiles+", processed "+status.ProcessedFiles+", not followed "+status.NotFollowed+").");
+                    Check(status.Stage.Contains("2 links not followed"),"The finished scan must say how many links were not followed: "+status.Stage);
+                    using(var reader=new SqliteConnection(database,true)){
+                        Check(Convert.ToInt64(reader.Scalar("SELECT COUNT(*) FROM diagnostics WHERE level='warning' AND message LIKE 'Not followed:%' AND (path LIKE '%linked folder' OR path LIKE '%linked.user')"))==2,
+                            "Each shortcut that is not followed must be named in the diagnostics log.");
+                        Check(Convert.ToInt64(reader.Scalar("SELECT COUNT(*) FROM diagnostics WHERE stage='Scan summary' AND message LIKE '%2 links not followed%'"))==1,
+                            "The scan summary must give the number of links not followed.");
+                        Check(Convert.ToInt64(reader.Scalar("SELECT COUNT(*) FROM jobs WHERE path LIKE '%My Music'"))==0,
+                            "A Windows compatibility junction must be skipped without being recorded.");
+                    }
+                }
+            }finally{
+                // Remove the links themselves so no later clean-up can walk through them.
+                foreach(string link in new[]{nested,user,compatibility})if(Directory.Exists(link)){File.SetAttributes(link,FileAttributes.Directory);Directory.Delete(link,false);}
+            }
+        }
+        // A new or changed originals password needs at least 12 characters. Unlocking with an existing password does not.
+        static void CheckNewPasswordLength(string directory) {
+            using(var engine=ReviewerEngine.Open(Path.Combine(directory,"password-rules.sqlite"),true)){
+                Wait(()=>engine.Ready || engine.Faulted);Check(engine.Ready,engine.Status.Error);
+                var refused=WaitForResult(engine,engine.RequestVaultUnlock(Encoding.UTF8.GetBytes("eleven char"),true));
+                Check(!refused.Success && refused.Error.Contains("at least 12 characters") && !engine.VaultExists,"A new originals password shorter than 12 characters must be refused.");
+                Result(engine,engine.RequestVaultUnlock(Encoding.UTF8.GetBytes(FixturePassword),true));
+                bool rejected=false;
+                try{engine.RequestVaultPasswordChange(Encoding.UTF8.GetBytes(FixturePassword),Encoding.UTF8.GetBytes("short"),Guid.NewGuid().ToString("N"));}
+                catch(ArgumentException error){rejected=error.Message.Contains("at least 12 characters");}
+                Check(rejected,"Changing the originals password to one shorter than 12 characters must be refused.");
+                Result(engine,engine.RequestVaultLock());
+                Result(engine,engine.RequestVaultUnlock(Encoding.UTF8.GetBytes(FixturePassword),false));
+            }
+        }
+        static void Junction(string link,string target){
+            RunTool("cmd.exe","/c mklink /J \""+link+"\" \""+target+"\"");
+            Check(Directory.Exists(link),"Could not create the test junction "+link+".");
+        }
+        static void RunTool(string program,string arguments){
+            var start=new ProcessStartInfo(program,arguments){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};
+            using(var process=Process.Start(start)){process.StandardOutput.ReadToEnd();process.StandardError.ReadToEnd();process.WaitForExit();
+                Check(process.ExitCode==0,program+" "+arguments+" failed with exit code "+process.ExitCode+".");}
         }
         // One refused member must not hide the rest of a ZIP, and a renamed picture inside a ZIP must still be found.
         static void CheckArchiveMembers(string directory,string image) {

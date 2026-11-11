@@ -40,6 +40,11 @@ namespace MediaReviewer {
         readonly List<Thread> fileWorkers=new List<Thread>(); Thread publisher,decoder;
         readonly object reviewMatchGate=new object();
         ScanOptions options; string rootId; int currentUser=-1,activeHash; volatile bool finished; volatile string workerFailure;
+        // A link is recorded with its own state so it is never counted as discovered or processed media.
+        // The first few are named in the diagnostics log, and the scan summary gives the total.
+        internal const string NotFollowed="not_followed"; const int ShortcutLogLimit=20;
+        const string ShortcutMessage="Not followed: this is a link (junction, symbolic link or mount point) that can lead to another location. Scan its target folder directly if it should be reviewed.";
+        int shortcutsLogged;
         internal bool Finished { get { return finished; } }
         internal ScanRunner(ReviewerEngine owner,ScanOptions config,string scanId,bool continuing,int workers) {
             engine=owner; options=config; id=scanId; resume=continuing; resumeWorkers=workers;
@@ -125,16 +130,26 @@ namespace MediaReviewer {
                                     db.Execute("UPDATE jobs SET state='pending' WHERE scan_id=? AND state='processing'",id);
                                     db.Execute("UPDATE scans SET state=?,completed_at=? WHERE id=?",completed ? (withErrors ? "complete_errors" : "complete") : failure==null ? "cancelled" : "failed",completed ? Catalog.Now() : null,id);
                                 }
+                                long shortcuts=Convert.ToInt64(db.Scalar("SELECT COALESCE(SUM(total),0) FROM scan_counters WHERE scan_id=? AND state=?",id,NotFollowed))+
+                                    Convert.ToInt64(db.Scalar("SELECT COUNT(*) FROM scan_users WHERE scan_id=? AND state='skipped'",id));
                                 Catalog.Log(db,failure==null ? "info" : "error","Scan summary",options==null ? "" : options.RootPath,
-                                    completed ? "Scan completed"+(withErrors ? " with errors" : " cleanly") : failure ?? "Scan cancelled; committed results and pending jobs are retained");
+                                    (completed ? "Scan completed"+(withErrors ? " with errors" : " cleanly") : failure ?? "Scan cancelled; committed results and pending jobs are retained")+ShortcutSummary(shortcuts));
                             });
                             return null;
                         }); Refresh();
                     } catch(Exception error) { if(failure==null) failure=error.Message; }
                 }
                 finished=true;
-                engine.Update(s=>{s.RunningScan=false;s.CompletedWithErrors=withErrors;if(!engine.Faulted)s.Error=failure??s.Error;s.ResumeId=completed ? "" : id;s.PreparedQueueCount=0;s.RetainedBytes=0;s.Stage=engine.Faulted ? "Database stopped; scan interrupted" : completed ? (withErrors ? "Completed with errors" : "Completed") : failure==null ? "Cancelled; resume is available" : "Scan stopped: "+failure;});
+                engine.Update(s=>{s.RunningScan=false;s.CompletedWithErrors=withErrors;if(!engine.Faulted)s.Error=failure??s.Error;s.ResumeId=completed ? "" : id;s.PreparedQueueCount=0;s.RetainedBytes=0;s.Stage=(engine.Faulted ? "Database stopped; scan interrupted" : completed ? (withErrors ? "Completed with errors" : "Completed") : failure==null ? "Cancelled; resume is available" : "Scan stopped: "+failure)+(engine.Faulted ? "" : ShortcutSummary(s.NotFollowed));});
             }
+        }
+        internal static string LinksNotFollowed(long count) {
+            return count.ToString("N0",CultureInfo.CurrentCulture)+(count==1 ? " link" : " links")+" not followed";
+        }
+        static string ShortcutSummary(long count) { return count<=0 ? "" : " · "+LinksNotFollowed(count)+" (see the diagnostics log)"; }
+        void LogShortcut(SqliteConnection db,string kind,string relative) {
+            if(shortcutsLogged>=ShortcutLogLimit) return; shortcutsLogged++;
+            Catalog.Log(db,"warning",kind,Full(relative),ShortcutMessage);
         }
         void Manifest() {
             var rows=new List<SourceEntry>();
@@ -142,7 +157,7 @@ namespace MediaReviewer {
             Retry(()=> {
                 try {
                     foreach(SourceEntry entry in FileAccessNative.Entries(options.RootPath,cancellation.Token)) {
-                        if(!entry.Directory) continue; rows.Add(entry); if(rows.Count>=32) FlushManifest(rows);
+                        if(!entry.Directory || entry.CompatibilityLink) continue; rows.Add(entry); if(rows.Count>=32) FlushManifest(rows);
                     }
                 } finally { if(rows.Count>0 && !cancellation.IsCancellationRequested) FlushManifest(rows); }
             },"Listing immediate user folders",options.RootPath,null);
@@ -160,7 +175,7 @@ namespace MediaReviewer {
         void FlushManifest(List<SourceEntry> rows) {
             var batch=new List<SourceEntry>(rows); rows.Clear();
             int added=(int)Write(db=> {
-                db.Execute("BEGIN IMMEDIATE"); try { int changes=0; foreach(SourceEntry entry in batch) changes+=db.Execute("INSERT OR IGNORE INTO scan_users(scan_id,name,path,path_key,sort_key,state) VALUES(?,?,?,?,?,?)",id,entry.Name,entry.Name,Paths.Key(entry.Name),entry.Name.ToUpperInvariant(),entry.Reparse ? "skipped" : "pending"); db.Execute("COMMIT"); return changes; } catch { Catalog.Rollback(db); throw; }
+                db.Execute("BEGIN IMMEDIATE"); try { int changes=0; foreach(SourceEntry entry in batch) { int inserted=db.Execute("INSERT OR IGNORE INTO scan_users(scan_id,name,path,path_key,sort_key,state) VALUES(?,?,?,?,?,?)",id,entry.Name,entry.Name,Paths.Key(entry.Name),entry.Name.ToUpperInvariant(),entry.Shortcut ? "skipped" : "pending"); if(inserted>0 && entry.Shortcut) LogShortcut(db,"directory",entry.Name); changes+=inserted; } db.Execute("COMMIT"); return changes; } catch { Catalog.Rollback(db); throw; }
             },batch.Sum(x=>x.Name.Length*4+128));
             engine.Update(s=>{s.TotalUsers+=added;s.Stage="Saving user-folder manifest: "+s.TotalUsers;s.LastProgressUtc=DateTime.UtcNow;});
         }
@@ -194,17 +209,19 @@ namespace MediaReviewer {
                 Retry(()=> {
                     try {
                         foreach(SourceEntry entry in FileAccessNative.Entries(Full(job.Path),cancellation.Token)) {
-                            if(rootFiles && entry.Directory) continue;
+                            if((rootFiles && entry.Directory) || entry.CompatibilityLink) continue;
                             if(entry.Directory && options.ExcludeApplicationData && (entry.Name.Equals("AppData",StringComparison.OrdinalIgnoreCase) || entry.Name.Equals("Application Data",StringComparison.OrdinalIgnoreCase))) continue;
                             string relative=String.IsNullOrEmpty(job.Path) ? entry.Name : Path.Combine(job.Path,entry.Name);
                             string kind=entry.Directory ? "directory" : "file";
                             if(!entry.Directory) {
                                 string ext=Path.GetExtension(entry.Name).TrimStart('.').ToLowerInvariant();
                                 if(options.ScanArchives && ext=="zip")kind="archive";
+                                // A file stored elsewhere (cloud placeholder, tiered or archived) is fetched when read, so
+                                // its first bytes are checked for renamed media only when it has a selected media extension.
                                 else if((options.CutoffUtcTicks>0 && entry.ModifiedTicks<options.CutoffUtcTicks) ||
-                                    !options.Extensions.Contains(ext) && (!options.SniffRenamed || Formats.Supported(ext) || ext=="zip"))continue;
+                                    !options.Extensions.Contains(ext) && (!options.SniffRenamed || entry.StoredElsewhere || Formats.Supported(ext) || ext=="zip"))continue;
                             }
-                            var row=new DiscoveryRow { Path=relative,Kind=kind,State=entry.Reparse ? "skipped" : "pending" }; batch.Add(row); retained+=row.Cost;
+                            var row=new DiscoveryRow { Path=relative,Kind=kind,State=entry.Shortcut ? NotFollowed : "pending" }; batch.Add(row); retained+=row.Cost;
                             if(batch.Count>=32 || retained>=1024*1024) { FlushDiscovery(batch,job.User); retained=0; Backpressure(job.User); }
                         }
                     } finally { if(batch.Count>0 && !cancellation.IsCancellationRequested) { FlushDiscovery(batch,job.User); retained=0; } }
@@ -214,7 +231,7 @@ namespace MediaReviewer {
         }
         void FlushDiscovery(List<DiscoveryRow> rows,int ordinal) {
             var batch=new List<DiscoveryRow>(rows); rows.Clear();
-            Write(db=> { db.Execute("BEGIN IMMEDIATE"); try { foreach(DiscoveryRow row in batch) db.Execute("INSERT OR IGNORE INTO jobs(scan_id,user_ordinal,kind,path,path_key,state,signature,error) VALUES(?,?,?,?,?,?,?,?)",id,ordinal,row.Kind,row.Path,Paths.Key(row.Path),row.State,row.Signature,row.Error); db.Execute("COMMIT"); } catch { Catalog.Rollback(db); throw; } return null; },batch.Sum(x=>x.Cost));
+            Write(db=> { db.Execute("BEGIN IMMEDIATE"); try { foreach(DiscoveryRow row in batch) { int added=db.Execute("INSERT OR IGNORE INTO jobs(scan_id,user_ordinal,kind,path,path_key,state,signature,error) VALUES(?,?,?,?,?,?,?,?)",id,ordinal,row.Kind,row.Path,Paths.Key(row.Path),row.State,row.Signature,row.Error); if(added>0 && row.State==NotFollowed) LogShortcut(db,row.Kind,row.Path); } db.Execute("COMMIT"); } catch { Catalog.Rollback(db); throw; } return null; },batch.Sum(x=>x.Cost));
             engine.Update(s=>s.LastProgressUtc=DateTime.UtcNow);
         }
         void Backpressure(int ordinal) {
@@ -318,21 +335,26 @@ namespace MediaReviewer {
         void FailWorker(Exception error) { workerFailure=FileAccessNative.Describe(error); engine.Update(s=>s.Error="Worker stopped: "+workerFailure); cancellation.Cancel(); }
         void Refresh() {
             if(engine.Faulted) return;
-            var counts=(List<object[]>)Write(db=>db.Query("SELECT kind,state,total FROM scan_counters WHERE scan_id=?",new object[]{id},30));
+            long shortcuts=0;
+            var counts=(List<object[]>)Write(db=>{shortcuts=Convert.ToInt64(db.Scalar("SELECT COUNT(*) FROM scan_users WHERE scan_id=? AND state='skipped'",id));return db.Query("SELECT kind,state,total FROM scan_counters WHERE scan_id=?",new object[]{id},30);});
             long discovered=0,done=0,failed=0,pending=0;
-            foreach(object[] row in counts) { if((string)row[0]=="file") { discovered+=(long)row[2]; if((string)row[1]=="complete" || options.SniffRenamed && (string)row[1]=="skipped") done+=(long)row[2]; } if((string)row[1]=="failed") failed+=(long)row[2]; if((string)row[1]=="pending" || (string)row[1]=="processing") pending+=(long)row[2]; }
-            engine.Update(s=>{s.DiscoveredFiles=discovered;s.ProcessedFiles=done;s.FailedFiles=failed;s.PendingWork=pending;s.RetainedBytes=prepared.Bytes;s.PreparedQueueCount=prepared.Count;});
+            foreach(object[] row in counts) {
+                // "skipped" means the file was read and is not media (or is older than the cutoff); a link was never read.
+                if((string)row[1]==NotFollowed) { shortcuts+=(long)row[2]; continue; }
+                if((string)row[0]=="file") { discovered+=(long)row[2]; if((string)row[1]=="complete" || (string)row[1]=="skipped") done+=(long)row[2]; } if((string)row[1]=="failed") failed+=(long)row[2]; if((string)row[1]=="pending" || (string)row[1]=="processing") pending+=(long)row[2];
+            }
+            engine.Update(s=>{s.DiscoveredFiles=discovered;s.ProcessedFiles=done;s.FailedFiles=failed;s.PendingWork=pending;s.NotFollowed=shortcuts;s.RetainedBytes=prepared.Bytes;s.PreparedQueueCount=prepared.Count;});
         }
     }
     public sealed partial class ReviewerEngine {
         readonly object scanGate=new object(); ScanRunner scan;
         public string StartScan(ScanOptions options) {
             if(options==null) throw new ArgumentNullException("options"); ScanOptions copy=options.Copy(); copy.Validate();
-            lock(scanGate) { if(!Ready || Faulted || closing || reportActive || sourceConnectionBusy || DraftReviewActive || (scan!=null && !scan.Finished)) throw new InvalidOperationException("Wait for the current scan or background work before starting a scan."); string id=Guid.NewGuid().ToString(); scan=new ScanRunner(this,copy,id,false,copy.WorkerCount); Update(s=>{s.RunningScan=true;s.CancelRequested=false;s.CompletedWithErrors=false;s.Error="";s.ScanId=id;s.Stage="Preparing scan";s.CompletedUsers=0;s.TotalUsers=0;s.BytesRead=0;}); scan.Start(); return id; }
+            lock(scanGate) { if(!Ready || Faulted || closing || reportActive || sourceConnectionBusy || DraftReviewActive || (scan!=null && !scan.Finished)) throw new InvalidOperationException("Wait for the current scan or background work before starting a scan."); string id=Guid.NewGuid().ToString(); scan=new ScanRunner(this,copy,id,false,copy.WorkerCount); Update(s=>{s.RunningScan=true;s.CancelRequested=false;s.CompletedWithErrors=false;s.Error="";s.ScanId=id;s.Stage="Preparing scan";s.CompletedUsers=0;s.TotalUsers=0;s.BytesRead=0;s.NotFollowed=0;}); scan.Start(); return id; }
         }
         public void ResumeScan(string id,int workers) {
             if(workers<1 || workers>8) throw new ArgumentException("Choose 1–8 workers");
-            lock(scanGate) { if(!Ready || Faulted || closing || reportActive || sourceConnectionBusy || DraftReviewActive || (scan!=null && !scan.Finished)) throw new InvalidOperationException("Wait for the current scan or background work before resuming."); scan=new ScanRunner(this,null,id,true,workers); Update(s=>{s.RunningScan=true;s.CancelRequested=false;s.CompletedWithErrors=false;s.Error="";s.ScanId=id;s.Stage="Loading saved manifest";s.BytesRead=0;}); scan.Start(); }
+            lock(scanGate) { if(!Ready || Faulted || closing || reportActive || sourceConnectionBusy || DraftReviewActive || (scan!=null && !scan.Finished)) throw new InvalidOperationException("Wait for the current scan or background work before resuming."); scan=new ScanRunner(this,null,id,true,workers); Update(s=>{s.RunningScan=true;s.CancelRequested=false;s.CompletedWithErrors=false;s.Error="";s.ScanId=id;s.Stage="Loading saved manifest";s.BytesRead=0;s.NotFollowed=0;}); scan.Start(); }
         }
         public void CancelScan() { lock(scanGate) if(scan!=null && !scan.Finished) scan.Cancel(); }
         partial void StopScanner() { CancelScan(); }

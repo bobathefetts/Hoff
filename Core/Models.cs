@@ -77,6 +77,8 @@ namespace MediaReviewer {
         public string Stage="Opening database",Error="",ScanId="",User="",ResumeId="";
         public bool RunningScan,CancelRequested,CompletedWithErrors,BusyOperation;
         public long DiscoveredFiles,ProcessedFiles,FailedFiles,BytesRead,PublishedGroups,Revision,WalBytes,PendingWork;
+        // Links (junctions, symbolic links, mount points) the current scan found and did not follow.
+        public long NotFollowed;
         public int CompletedUsers,TotalUsers,QueueCount,PreparedQueueCount; public long RetainedBytes;
         public DateTime LastCommitUtc,LastProgressUtc;
         internal StatusSnapshot Copy() { return (StatusSnapshot)MemberwiseClone(); }

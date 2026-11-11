@@ -334,7 +334,7 @@ namespace MediaReviewer {
                 else{
                     if(image.Source==null && (row.PreviewBytes!=null || CanPlayQuickVideo(row)))
                         Guard(()=>loader.QueueInspect(row,inspection.Advance(),256,true));
-                    if(!Formats.UsesPlaybackProxy(row.Extension))player.Prepare();
+                    // As in Quick Review, the video is opened only when the reviewer presses Play.
                 }
                 viewport.Focus();
             };

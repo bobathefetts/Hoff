@@ -118,7 +118,7 @@ namespace MediaReviewer {
                 throw new IOException("The private AI worker exceeded its time limit and was stopped.");
             }
             try{return task.GetAwaiter().GetResult();}
-            catch(EndOfStreamException){throw new IOException("The private AI worker closed unexpectedly. Check the approved endpoint logs for a block or process failure.");}
+            catch(EndOfStreamException){throw new IOException("The AI worker stopped unexpectedly. It may have crashed or run out of memory, or security software may have blocked it; antivirus or application-control logs can show a block.");}
         }
 
         public void Dispose(){
@@ -210,12 +210,12 @@ namespace MediaReviewer {
         static void CheckLocalFile(string file){
             string root=Path.GetPathRoot(file);
             if(root.Length!=3 || root[1]!=':' || new DriveInfo(root).DriveType!=DriveType.Fixed)
-                throw new InvalidOperationException("Run FleetHacker and its model file from a local fixed drive for AI draft review.");
+                throw new InvalidOperationException("For AI draft review, run "+Product.ExecutableName+" and its model file from a local fixed drive.");
             string item=root;
             foreach(string component in file.Substring(root.Length).Split(Path.DirectorySeparatorChar)){
                 item=Path.Combine(item,component);
                 try{if((File.GetAttributes(Paths.Io(item))&(FileAttributes.ReparsePoint|FileAttributes.Offline))!=0)throw new InvalidOperationException("AI draft review requires a local folder and model file without offline or redirected files.");}
-                catch(FileNotFoundException){throw new FileNotFoundException("Place the approved "+Path.GetFileName(file)+" next to FleetHacker.exe.");}
+                catch(FileNotFoundException){throw new FileNotFoundException("Place the approved "+Path.GetFileName(file)+" in the same folder as "+Product.ExecutableName+".");}
             }
         }
 

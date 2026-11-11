@@ -69,7 +69,7 @@ namespace MediaReviewer {
         int quickDecodeSide;
         MediaRow quickVideoRow;
         VideoPlaybackControls quickPlayer;
-        DispatcherTimer quickVideoWarmup;
+        internal VideoPlaybackControls QuickPlayer {get{return quickPlayer;}}
         double quickZoom=1.0,quickPanX,quickPanY;
         int quickRotation;
         static string WindowsReviewerLabel(){
@@ -132,8 +132,6 @@ namespace MediaReviewer {
             Click("QuickZoomResetButton",()=>{FocusQuick();ResetQuickTransform();});
             Click("QuickRotateLeftButton",()=>{FocusQuick();RotateQuick(-90);});
             Click("QuickRotateRightButton",()=>{FocusQuick();RotateQuick(90);});
-            quickVideoWarmup=new DispatcherTimer(DispatcherPriority.Background){Interval=TimeSpan.FromMilliseconds(350)};
-            quickVideoWarmup.Tick+=(s,e)=>{quickVideoWarmup.Stop();if(quickPlayer!=null)quickPlayer.Prepare();};
             SetUpQuickGestures();
             Window.PreviewKeyDown+=ReviewKey;
             Get<Grid>("ReviewArea").SizeChanged+=(s,e)=>{
@@ -268,7 +266,7 @@ namespace MediaReviewer {
 
         void ClearQuickVideo() {
             if(quickPlayer==null)return;
-            quickVideoWarmup.Stop();quickPlayer.Dispose();
+            quickPlayer.Dispose();
             quickPlayer=null;quickVideoRow=null;
             var host=Get<ContentControl>("QuickVideoHost");
             host.Content=null;host.Visibility=Visibility.Collapsed;
@@ -300,7 +298,8 @@ namespace MediaReviewer {
             quickVideoRow=row;
             var host=Get<ContentControl>("QuickVideoHost");
             host.Content=quickPlayer;host.Visibility=Visibility.Visible;
-            if(!Formats.UsesPlaybackProxy(row.Extension))quickVideoWarmup.Start();
+            // The video itself is opened only when the reviewer presses Play. Opening it starts the Windows media
+            // pipeline inside this process on a file from the scanned drive; the saved poster covers the wait.
         }
         void LoadQuickPreview() {
             if(display!=ReviewView.Quick || inspector!=null)return;

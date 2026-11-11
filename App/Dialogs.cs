@@ -121,15 +121,27 @@ namespace MediaReviewer {
         }
 
         byte[] Password(string title,string prompt,bool confirm){
-            var panel=new StackPanel {Margin=new Thickness(18)};var dialog=Dialog(title,panel,535,confirm ? 315 : 250);
+            var panel=new StackPanel {Margin=new Thickness(18)};var dialog=Dialog(title,panel,535,confirm ? 380 : 280);
             panel.Children.Add(Label(prompt));
             var input=new PasswordBox {Height=36,Padding=new Thickness(6),VerticalContentAlignment=VerticalAlignment.Center,MaxLength=16384};panel.Children.Add(input);
             var again=new PasswordBox {Height=36,Padding=new Thickness(6),VerticalContentAlignment=VerticalAlignment.Center,MaxLength=16384};
-            if(confirm){panel.Children.Add(Label("Confirm password"));panel.Children.Add(again);}
+            if(confirm){
+                panel.Children.Add(Label("Confirm password"));panel.Children.Add(again);
+                panel.Children.Add(Label("Use at least "+ReviewerEngine.MinimumNewPasswordCharacters+" characters. A lost password cannot be recovered."));
+            }
+            // Says why nothing happened, instead of leaving the dialog open with no explanation.
+            var feedback=Label("");feedback.Foreground=Brushes.Firebrick;panel.Children.Add(feedback);
             var actions=Bar();panel.Children.Add(actions);byte[] value=null;
             var ok=ActionButton(confirm ? "Set password" : "Unlock",()=>{
-                byte[] first=null,second=null;try{using(var secure=input.SecurePassword)first=PasswordBytes(secure);if(confirm)using(var secure=again.SecurePassword)second=PasswordBytes(secure);if(first.Length==0 || confirm && !first.SequenceEqual(second))return;
-                value=first;first=null;dialog.DialogResult=true;}finally{if(first!=null)Array.Clear(first,0,first.Length);if(second!=null)Array.Clear(second,0,second.Length);}
+                byte[] first=null,second=null;int characters=0;
+                try{
+                    using(var secure=input.SecurePassword){characters=secure.Length;first=PasswordBytes(secure);}
+                    if(confirm)using(var secure=again.SecurePassword)second=PasswordBytes(secure);
+                    if(first.Length==0){feedback.Text="Enter a password.";input.Focus();return;}
+                    if(confirm && characters<ReviewerEngine.MinimumNewPasswordCharacters){feedback.Text="Use at least "+ReviewerEngine.MinimumNewPasswordCharacters+" characters.";input.Focus();return;}
+                    if(confirm && !first.SequenceEqual(second)){feedback.Text="The two passwords do not match.";again.Clear();again.Focus();return;}
+                    value=first;first=null;dialog.DialogResult=true;
+                }finally{if(first!=null)Array.Clear(first,0,first.Length);if(second!=null)Array.Clear(second,0,second.Length);}
             });
             ok.IsDefault=true;actions.Children.Add(ok);var cancel=ActionButton("Cancel",dialog.Close);cancel.IsCancel=true;actions.Children.Add(cancel);
             dialog.Loaded+=(s,e)=>input.Focus();try{dialog.ShowDialog();return value;}finally{input.Clear();again.Clear();}
@@ -318,7 +330,7 @@ namespace MediaReviewer {
             model.SelectedIndex=available && useGemma ? 1 : 0;
             System.Windows.Automation.AutomationProperties.SetName(model,"AI review model");body.Children.Add(model);
             if(!available)body.Children.Add(Label(DraftModelWorker.GemmaCpuSupported() ?
-                "Place both Gemma GGUF files beside FleetHacker to enable the Gemma option." :
+                "Place both Gemma GGUF files in the same folder as "+Product.ExecutableName+" to enable the Gemma option." :
                 "Gemma requires AVX2, FMA and F16C on this device."));
             var devicePanel=new StackPanel();devicePanel.Children.Add(Label("Gemma processing device"));
             var device=new ComboBox();device.Items.Add("Auto (use GPU when available)");device.Items.Add("CPU only");device.SelectedIndex=gemmaCpuOnly ? 1 : 0;

@@ -186,7 +186,8 @@ namespace MediaReviewer {
         void UpdateCenterBadge() {
             bool hasFrame=media!=null && media.Opacity==1;
             bool missingPicture=!hasFrame && (poster==null || poster.Source==null);
-            bool showPlay=!preparing && !playRequested && ((opened && (paused || ended)) || (!opened && userStopped));
+            // Before the video is opened (it opens only on Play) the badge shows it is a video, not a still picture.
+            bool showPlay=!preparing && !playRequested && ((opened && (paused || ended)) || !opened);
             centerPlayBadge.Visibility=!disposed && (missingPicture || showPlay) ? Visibility.Visible : Visibility.Collapsed;
             centerPlayBadge.Width=missingPicture ? Double.NaN : 68;
             centerPlayBadge.Height=missingPicture ? Double.NaN : 68;
@@ -262,8 +263,10 @@ namespace MediaReviewer {
             BeginPrepare(true);
         }
         internal void Prepare() {if(!disposed && !userStopped && !opened && !preparing)BeginPrepare(false);}
+        // True once this player has asked for its video, whether or not that succeeded. The self-test uses it.
+        internal bool LoadRequested {get;private set;}
         void BeginPrepare(bool startPlaying) {
-            playRequested=startPlaying;preparing=true;
+            playRequested=startPlaying;preparing=true;LoadRequested=true;
             long request=++generation;play.IsEnabled=!startPlaying;stop.IsEnabled=true;
             status.Text=TemporarySource ? "Preparing offline playback copy…" : "Loading video…";
             timer.Start();ShowOverlay();
